@@ -6,17 +6,31 @@ import {
   ArrowUpDown,
   ChevronDown,
   ChevronRight,
-  EyeIcon
+  EyeIcon,
+  CheckSquare,
+  Square,
+  MoreVertical
 } from "lucide-react";
 import { Dispatch, SetStateAction } from "react";
 import CircularProgress from "../components/ui-component/CircularProgress";
+import { resolveTemplateText } from "./utils";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+} from "../components/ui-component/DropDown";
 
 interface getColumnsParameters {
   setSelectedEmail: Dispatch<SetStateAction<getEmailLogsApiResponse | null>>;
+  onResponded: (sessionId: string) => void;
 }
 
 export const getColumns = ({
   setSelectedEmail,
+  onResponded,
 }: getColumnsParameters): ColumnDef<getEmailLogsApiResponse, any>[] => {
   return [
     {
@@ -55,9 +69,17 @@ export const getColumns = ({
     {
       accessorKey: "subject",
       header: "Subject",
-      cell: ({ row }) => (
-        <div className="capitalize">{row.getValue("subject")}</div>
-      ),
+      cell: ({ row }) => {
+        const raw = row.getValue<string>("subject") || "";
+        // Resolve {{placeholders}} using the session's global variables (and the
+        // first recipient's local vars as a fallback for {{receiver_name}}).
+        const resolved = resolveTemplateText(
+          raw,
+          row.original.global_variables,
+          row.original.email_logs?.[0]?.local_variables
+        );
+        return <div className="capitalize">{resolved}</div>;
+      },
     },
     {
       accessorKey: "status",
@@ -117,15 +139,38 @@ export const getColumns = ({
     {
       id: "actions",
       header: "Actions",
-      cell: ({ row }) => (
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setSelectedEmail(row.original)}
-        >
-          <EyeIcon className="h-4 w-4 mr-1" /> Details
-        </Button>
-      ),
+      enableSorting: false,
+      cell: ({ row }) => {
+        if (row.depth > 0) return null;
+        const anyResponded = (row.original.email_logs || []).some(
+          (l: any) => l?.user_actions?.responded
+        );
+        return (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-8 w-8">
+                <MoreVertical className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuLabel>Actions</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => setSelectedEmail(row.original)}>
+                <EyeIcon className="h-4 w-4" />
+                View details
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => onResponded(row.original.id)}>
+                {anyResponded ? (
+                  <CheckSquare className="h-4 w-4 text-green-600" />
+                ) : (
+                  <Square className="h-4 w-4" />
+                )}
+                {anyResponded ? "Responded ✓ (edit)" : "Who responded?"}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        );
+      },
     },
   ];
 };

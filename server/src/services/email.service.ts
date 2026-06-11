@@ -411,42 +411,62 @@ export class EmailService {
         .replace(/\//g, "_");
 
       try {
+        logger.info("Sending email via Gmail SDK", { recipient });
         const response = await gmail.users.messages.send({
           userId: "me",
           requestBody: { raw: encodedMessage },
         });
+        logger.info("Gmail SDK response", {
+          recipient,
+          status: response.status,
+          messageId: response.data?.id,
+          labelIds: response.data?.labelIds,
+        });
 
-        if (response?.status === 200) {
+        if (response.status === 200) {
           emailStatuses.push({ email: recipient, status: "sent" });
           sentCount++;
 
           await this.historyRepository.updateEmailLogStatus(emailLog.id, "sent");
 
-          // Insert into sent_email_records only if email doesn't already exist
           try {
             const firstName = recipientLocalVars.find((v) => v.key === "receiver_name")?.value
               || extractReceiverNameFromEmail(recipient);
             const companyName = global_variables.find((v) => v.key === "company_name")?.value || null;
 
+            // is_valid starts as 'not_verified'; the bounce-scan cron flips it to
+            // 'valid' / 'failed' once it inspects the Gmail thread. On re-send we
+            // reset it so the address gets re-verified.
             await pool.query(
-              `INSERT INTO sent_email_records (first_name, email, company_name, sent_at, type)
-               VALUES ($1, $2, $3, NOW(), 'sent')
+              `INSERT INTO sent_email_records (first_name, email, company_name, sent_at, type, is_valid)
+               VALUES ($1, $2, $3, NOW(), 'sent', 'not_verified')
                ON CONFLICT (email) DO UPDATE
                  SET type     = 'sent',
-                     sent_at  = EXCLUDED.sent_at`,
+                     sent_at  = EXCLUDED.sent_at,
+                     is_valid = 'not_verified'`,
               [firstName, recipient, companyName]
             );
           } catch (recordErr) {
             logger.error("Failed to insert sent_email_record", { recipient, error: recordErr });
           }
+
+          logger.info("Email sent successfully", {
+            recipient,
+            messageId: response.data?.id,
+          });
         } else {
+          logger.warn("Unexpected Gmail response status", { recipient, status: response.status });
           emailStatuses.push({ email: recipient, status: "failed" });
           failedCount++;
           await this.historyRepository.updateEmailLogStatus(emailLog.id, "failed");
         }
-        logger.info("Email sent successfully", { recipient, messageId: response?.data?.id });
-      } catch (emailError) {
-        logger.error("Error while sending email", { recipient, error: emailError });
+      } catch (emailError: any) {
+        logger.error("Error while sending email", {
+          recipient,
+          error: emailError?.message,
+          responseStatus: emailError?.response?.status,
+          responseData: emailError?.response?.data,
+        });
         emailStatuses.push({ email: recipient, status: "failed" });
         failedCount++;
 

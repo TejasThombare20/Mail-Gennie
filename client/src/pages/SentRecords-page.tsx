@@ -31,6 +31,7 @@ interface SentEmailRecord {
   email: string;
   sent_at: string;
   type: "sent" | "imported";
+  is_valid?: "not_verified" | "valid" | "failed";
   created_at: string;
 }
 
@@ -41,7 +42,9 @@ interface RecordsResponse {
   totalPages: number;
 }
 
-const SentRecordsPage = () => {
+// `embedded` = rendered inside the dashboard layout (sidebar + header already
+// present), so we hide this page's own standalone top bar.
+const SentRecordsPage = ({ embedded = false }: { embedded?: boolean }) => {
   const [records, setRecords] = useState<SentEmailRecord[]>([]);
   const [companies, setCompanies] = useState<string[]>([]);
   const [selectedCompany, setSelectedCompany] = useState<string>("all");
@@ -148,19 +151,21 @@ const SentRecordsPage = () => {
   );
 
   return (
-    <div className="min-h-screen bg-background">
-      {/* Top bar with theme toggle */}
-      <div className="border-b">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Mail className="h-6 w-6 text-primary" />
-            <h1 className="text-xl font-bold text-foreground">
-              Sent Email Records
-            </h1>
+    <div className={embedded ? "bg-background" : "min-h-screen bg-background"}>
+      {/* Standalone top bar (only when not embedded in the dashboard layout) */}
+      {!embedded && (
+        <div className="border-b">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Mail className="h-6 w-6 text-primary" />
+              <h1 className="text-xl font-bold text-foreground">
+                Sent Email Records
+              </h1>
+            </div>
+            <ThemeToggle />
           </div>
-          <ThemeToggle />
         </div>
-      </div>
+      )}
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
         {/* Filters */}
@@ -222,13 +227,14 @@ const SentRecordsPage = () => {
                 <TableHead>Last Name</TableHead>
                 <TableHead>Company</TableHead>
                 <TableHead>Type</TableHead>
+                <TableHead>Validity</TableHead>
                 <TableHead>Sent At</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="text-center py-10">
+                  <TableCell colSpan={7} className="text-center py-10">
                     <div className="flex items-center justify-center gap-2 text-muted-foreground">
                       <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
                       Loading...
@@ -238,7 +244,7 @@ const SentRecordsPage = () => {
               ) : sortedRecords.length === 0 ? (
                 <TableRow>
                   <TableCell
-                    colSpan={6}
+                    colSpan={7}
                     className="text-center py-10 text-muted-foreground"
                   >
                     No records found
@@ -259,6 +265,9 @@ const SentRecordsPage = () => {
                       >
                         {record.type}
                       </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <ValidityBadge value={record.is_valid} />
                     </TableCell>
                     <TableCell>{formatDate(record.sent_at)}</TableCell>
                   </TableRow>
@@ -297,6 +306,21 @@ const SentRecordsPage = () => {
       </div>
     </div>
   );
+};
+
+const ValidityBadge = ({
+  value,
+}: {
+  value?: "not_verified" | "valid" | "failed";
+}) => {
+  switch (value) {
+    case "valid":
+      return <Badge className="bg-green-600 text-white border-0">Valid</Badge>;
+    case "failed":
+      return <Badge variant="destructive">Failed</Badge>;
+    default:
+      return <Badge variant="secondary">Not verified</Badge>;
+  }
 };
 
 export default SentRecordsPage;

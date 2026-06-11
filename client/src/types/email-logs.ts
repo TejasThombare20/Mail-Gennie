@@ -7,6 +7,7 @@ export interface EmailLogEntry {
   recipient_email: string;
   local_variables: TemplateVariable[];
   status: string;
+  user_actions?: Record<string, any>;
   sent_at: string;
   last_updated: string;
 }

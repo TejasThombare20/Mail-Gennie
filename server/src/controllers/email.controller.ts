@@ -12,19 +12,19 @@ export class EmailController {
         try {
           const { recipients, local_variables,global_variables, subject } = req.body;
           const templateId = req.params.id;
-    
+
           if (!templateId) {
             res.status(400).json({ error: "Template ID is required", message : "can't send  mail without template" , success : false });
             return;
           }
-    
+
           if (!recipients || !recipients?.length) {
             res.status(400).json({
               error: "at least one receipts required Recipients are required",
             });
             return;
           }
-    
+
           await this.emailService.sendEmail(
             req.user!.userId,
             templateId,
@@ -33,7 +33,7 @@ export class EmailController {
             local_variables,
             global_variables
           );
-    
+
           res.status(200).json({ message: "Email sent successfully" , success : true });
         } catch (error) {
           logger.error("Failed to send email", { error });

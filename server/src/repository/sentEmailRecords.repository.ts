@@ -9,6 +9,7 @@ export interface SentEmailRecord {
   email: string;
   sent_at: string;
   type: "sent" | "imported";
+  is_valid: "not_verified" | "valid" | "failed";
   created_at: string;
   updated_at: string;
 }
@@ -41,7 +42,7 @@ export class SentEmailRecordsRepository {
       const dataQuery = `
         SELECT * FROM sent_email_records
         ${whereClause}
-        ORDER BY created_at ASC
+        ORDER BY sent_at DESC NULLS LAST, created_at DESC
         LIMIT $${values.length + 1} OFFSET $${values.length + 2}
       `;
       const dataResult = await this.pool.query(dataQuery, [

@@ -52,7 +52,7 @@ export function Sidebar({ className }: SidebarProps) {
     },
     {
       title: 'Sent Records',
-      href: '/records',
+      href: '/dashboard/records',
       icon: <Users className="h-5 w-5" />
     },
     {

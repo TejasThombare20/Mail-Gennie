@@ -11,6 +11,7 @@ import Templatepage from './pages/Template-page';
 import AttachmentPage from './pages/Attachments-page';
 import HistoryPage from './pages/History-page';
 import SentRecordsPage from './pages/SentRecords-page';
+import OutreachPage from './pages/Outreach-page';
 import AuthCallbackPage from './pages/AuthCallback-page';
 
 function App() {
@@ -36,6 +37,8 @@ function App() {
             <Route path="templates/:templateId?" element={<Templatepage />} />
             <Route path="attachments" element={<AttachmentPage />} />
             <Route path="history" element={<HistoryPage />} />
+            <Route path="records" element={<SentRecordsPage embedded />} />
+            <Route path="outreach/:sessionId" element={<OutreachPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

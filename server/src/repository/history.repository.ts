@@ -129,7 +129,8 @@ export class HistoryRepository {
       // Fetch email logs for all these sessions in one query
       const sessionIds = sessions.map((s) => s.id);
       const logsResult = await this.pool.query(
-        `SELECT id, session_id, recipient_email, local_variables, status, sent_at, last_updated
+        `SELECT id, session_id, recipient_email, local_variables, status, sent_at, last_updated,
+                COALESCE(user_actions, '{}'::jsonb) AS user_actions
          FROM email_logs
          WHERE session_id = ANY($1)
          ORDER BY sent_at ASC`,
@@ -244,6 +245,375 @@ export class HistoryRepository {
     }
   }
 
+  // ── Bar-graph aggregation (company + date) ────────────────────────
+
+  /**
+   * Aggregates emails per (company, date) for the dashboard bar graph.
+   *
+   * Requirement: when the same company is mailed on the same date across
+   * multiple sessions (e.g. template 1 and template 2 both to "Google" on
+   * 2026-06-11 create separate sessions), they must collapse into a SINGLE
+   * bar — sent/failed counts summed.
+   *
+   * A session's sent/failed counts are attributed to each distinct company in
+   * that session. Sessions with no resolved company are bucketed under
+   * "(unknown)" so the totals still line up.
+   *
+   * Returned in chronological order (oldest first) so the UI can show the most
+   * recent N by default and let the user scroll left for older bars.
+   */
+  async getEmailsByCompanyDate(user_id: string): Promise<
+    Array<{
+      day: string; // YYYY-MM-DD
+      company: string;
+      sent: number;
+      failed: number;
+    }>
+  > {
+    try {
+      const result = await this.pool.query(
+        `WITH session_companies AS (
+           SELECT
+             es.id AS session_id,
+             to_char(es.started_at, 'YYYY-MM-DD') AS day,
+             es.sent_count,
+             es.failed_count,
+             COALESCE(
+               NULLIF(
+                 ARRAY(
+                   SELECT DISTINCT ser.company_name
+                   FROM email_logs el
+                   JOIN sent_email_records ser ON ser.email = el.recipient_email
+                   WHERE el.session_id = es.id
+                     AND ser.company_name IS NOT NULL
+                     AND ser.company_name != ''
+                 ),
+                 '{}'
+               ),
+               ARRAY['(unknown)']
+             ) AS companies
+           FROM email_sessions es
+           WHERE es.user_id = $1
+         )
+         SELECT
+           day,
+           company,
+           SUM(sent_count)::int AS sent,
+           SUM(failed_count)::int AS failed
+         FROM session_companies sc, unnest(sc.companies) AS company
+         GROUP BY day, company
+         ORDER BY day ASC, company ASC`,
+        [user_id]
+      );
+      return result.rows;
+    } catch (error) {
+      logger.error("Error aggregating emails by company/date", { error });
+      return [];
+    }
+  }
+
+  // ── Paginated dashboard sessions (table) ──────────────────────────
+
+  /**
+   * Returns a single page of session details for the dashboard table, with
+   * server-side search (over subject, template name, company names) and
+   * optional status / company filters applied across the FULL dataset.
+   *
+   * Also returns the total row count (for the filtered set) and the list of
+   * distinct statuses & companies available, so the UI can build filter menus.
+   */
+  async getDashboardSessionsPaginated(
+    user_id: string,
+    opts: {
+      page: number;
+      pageSize: number;
+      search?: string | null;
+      status?: string | null;
+      company?: string | null;
+    }
+  ): Promise<{
+    sessions: Array<{
+      id: string;
+      template_name: string | null;
+      status: string;
+      total_emails: number;
+      sent_count: number;
+      failed_count: number;
+      started_at: Date;
+      completed_at: Date | null;
+      created_at: Date;
+      duration_seconds: number | null;
+      outreach_details: Record<string, any>;
+      recipient_companies: string[];
+    }>;
+    total: number;
+    page: number;
+    pageSize: number;
+    filters: { statuses: string[]; companies: string[] };
+  } | null> {
+    try {
+      const page = Math.max(1, Math.floor(opts.page) || 1);
+      const pageSize = Math.min(100, Math.max(1, Math.floor(opts.pageSize) || 10));
+      const offset = (page - 1) * pageSize;
+
+      const search = opts.search?.trim() || null;
+      const status = opts.status?.trim() || null;
+      const company = opts.company?.trim() || null;
+
+      // A reusable CTE that resolves each session's company list once.
+      // Filtering by company / search-over-company both rely on it.
+      const baseCte = `
+        WITH session_companies AS (
+          SELECT
+            es.id AS session_id,
+            COALESCE(
+              ARRAY(
+                SELECT DISTINCT ser.company_name
+                FROM email_logs el
+                JOIN sent_email_records ser ON ser.email = el.recipient_email
+                WHERE el.session_id = es.id
+                  AND ser.company_name IS NOT NULL
+                  AND ser.company_name != ''
+              ),
+              '{}'
+            ) AS companies
+          FROM email_sessions es
+          WHERE es.user_id = $1
+        )
+      `;
+
+      // Build dynamic WHERE clause + params (shared between count & page query).
+      const params: any[] = [user_id];
+      const where: string[] = ["es.user_id = $1"];
+
+      if (status) {
+        params.push(status);
+        where.push(`es.status = $${params.length}`);
+      }
+
+      if (company) {
+        params.push(company);
+        where.push(`$${params.length} = ANY(sc.companies)`);
+      }
+
+      if (search) {
+        params.push(`%${search}%`);
+        const p = `$${params.length}`;
+        where.push(`(
+          es.subject ILIKE ${p}
+          OR t.name ILIKE ${p}
+          OR EXISTS (
+            SELECT 1 FROM unnest(sc.companies) AS c WHERE c ILIKE ${p}
+          )
+        )`);
+      }
+
+      const whereSql = where.join(" AND ");
+
+      // Total count for the filtered set.
+      const countResult = await this.pool.query(
+        `${baseCte}
+         SELECT COUNT(*)::int AS total
+         FROM email_sessions es
+         LEFT JOIN templates t ON es.template_id = t.id
+         JOIN session_companies sc ON sc.session_id = es.id
+         WHERE ${whereSql}`,
+        params
+      );
+      const total = countResult.rows[0]?.total ?? 0;
+
+      // The page itself.
+      const pageParams = [...params, pageSize, offset];
+      const sessionsResult = await this.pool.query(
+        `${baseCte}
+         SELECT
+           es.id,
+           t.name AS template_name,
+           es.status,
+           es.total_emails,
+           es.sent_count,
+           es.failed_count,
+           es.started_at,
+           es.completed_at,
+           es.created_at,
+           CASE
+             WHEN es.completed_at IS NOT NULL AND es.started_at IS NOT NULL
+             THEN EXTRACT(EPOCH FROM (es.completed_at - es.started_at))::int
+             ELSE NULL
+           END AS duration_seconds,
+           COALESCE(es.outreach_details, '{}'::jsonb) AS outreach_details,
+           sc.companies AS recipient_companies
+         FROM email_sessions es
+         LEFT JOIN templates t ON es.template_id = t.id
+         JOIN session_companies sc ON sc.session_id = es.id
+         WHERE ${whereSql}
+         ORDER BY es.started_at DESC
+         LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+        pageParams
+      );
+
+      // Distinct statuses & companies for the filter menus (unfiltered, for this user).
+      const statusesResult = await this.pool.query(
+        `SELECT DISTINCT status FROM email_sessions WHERE user_id = $1 AND status IS NOT NULL ORDER BY status`,
+        [user_id]
+      );
+      const companiesResult = await this.pool.query(
+        `SELECT DISTINCT ser.company_name AS company
+         FROM email_logs el
+         JOIN email_sessions es ON es.id = el.session_id
+         JOIN sent_email_records ser ON ser.email = el.recipient_email
+         WHERE es.user_id = $1
+           AND ser.company_name IS NOT NULL
+           AND ser.company_name != ''
+         ORDER BY company`,
+        [user_id]
+      );
+
+      return {
+        sessions: sessionsResult.rows,
+        total,
+        page,
+        pageSize,
+        filters: {
+          statuses: statusesResult.rows.map((r) => r.status),
+          companies: companiesResult.rows.map((r) => r.company),
+        },
+      };
+    } catch (error) {
+      logger.error("Error fetching paginated dashboard sessions", { error });
+      return null;
+    }
+  }
+
+  // ── Outreach / user-action methods ────────────────────────────────
+
+  /**
+   * Fetch a single session (with template name + resolved companies) plus its
+   * recipients, scoped to the owning user. Used to pre-fill the outreach form
+   * and to populate the recipient <Select> on the History "who responded" form.
+   */
+  async getSessionForOutreach(
+    sessionId: string,
+    user_id: string
+  ): Promise<{
+    id: string;
+    subject: string;
+    template_name: string | null;
+    status: string;
+    started_at: Date;
+    global_variables: any;
+    outreach_details: any;
+    recipient_companies: string[];
+    recipients: Array<{
+      id: number;
+      recipient_email: string;
+      status: string;
+      user_actions: Record<string, any>;
+    }>;
+  } | null> {
+    const sessionRes = await this.pool.query(
+      `SELECT
+         es.id,
+         es.subject,
+         t.name AS template_name,
+         es.status,
+         es.started_at,
+         es.global_variables,
+         es.outreach_details,
+         COALESCE(
+           ARRAY(
+             SELECT DISTINCT ser.company_name
+             FROM email_logs el
+             JOIN sent_email_records ser ON ser.email = el.recipient_email
+             WHERE el.session_id = es.id
+               AND ser.company_name IS NOT NULL
+               AND ser.company_name != ''
+           ),
+           '{}'
+         ) AS recipient_companies
+       FROM email_sessions es
+       LEFT JOIN templates t ON es.template_id = t.id
+       WHERE es.id = $1 AND es.user_id = $2`,
+      [sessionId, user_id]
+    );
+
+    if (sessionRes.rowCount === 0) return null;
+
+    const recipientsRes = await this.pool.query(
+      `SELECT id, recipient_email, status, COALESCE(user_actions, '{}'::jsonb) AS user_actions
+         FROM email_logs
+        WHERE session_id = $1
+        ORDER BY recipient_email ASC`,
+      [sessionId]
+    );
+
+    return {
+      ...sessionRes.rows[0],
+      recipients: recipientsRes.rows,
+    };
+  }
+
+  /**
+   * Merge interview / reach-out details into a session's outreach_details JSON.
+   * Stored at the session level (e.g. interview_scheduled flag + person info).
+   */
+  async updateSessionOutreachDetails(
+    sessionId: string,
+    user_id: string,
+    details: Record<string, any>
+  ): Promise<boolean> {
+    const res = await this.pool.query(
+      `UPDATE email_sessions
+          SET outreach_details = COALESCE(outreach_details, '{}'::jsonb) || $1::jsonb
+        WHERE id = $2 AND user_id = $3`,
+      [JSON.stringify(details), sessionId, user_id]
+    );
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * Replace the full interviewers array in a session's outreach_details.
+   * The UI manages add/update/delete client-side and sends the whole list.
+   * `interview_scheduled` is kept in sync (true when the list is non-empty).
+   */
+  async setSessionInterviewers(
+    sessionId: string,
+    user_id: string,
+    interviewers: any[]
+  ): Promise<boolean> {
+    const details = {
+      interviewers,
+      interview_scheduled: Array.isArray(interviewers) && interviewers.length > 0,
+    };
+    const res = await this.pool.query(
+      `UPDATE email_sessions
+          SET outreach_details = COALESCE(outreach_details, '{}'::jsonb) || $1::jsonb
+        WHERE id = $2 AND user_id = $3`,
+      [JSON.stringify(details), sessionId, user_id]
+    );
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * Merge user-level action flags (e.g. { responded: true, message: "..." })
+   * into a specific recipient's email_logs.user_actions JSON.
+   * Scoped by user_id for safety.
+   */
+  async updateLogUserActions(
+    logId: number,
+    user_id: string,
+    actions: Record<string, any>
+  ): Promise<boolean> {
+    const res = await this.pool.query(
+      `UPDATE email_logs
+          SET user_actions = COALESCE(user_actions, '{}'::jsonb) || $1::jsonb,
+              last_updated = NOW()
+        WHERE id = $2 AND user_id = $3`,
+      [JSON.stringify(actions), logId, user_id]
+    );
+    return (res.rowCount ?? 0) > 0;
+  }
+
   // ── Bounce scan methods ───────────────────────────────────────────
 
   /**
@@ -270,6 +640,29 @@ export class HistoryRepository {
     return result.rows;
   }
 
+  /**
+   * Returns not_verified addresses of type 'sent' (excludes CSV 'imported'),
+   * each paired with the user_id that last emailed it (via email_logs) when known.
+   * Addresses with no email_logs row get user_id = NULL (caller falls back to a
+   * default sender's Gmail account).
+   */
+  async getNotVerifiedSentAddresses(): Promise<
+    Array<{ email: string; user_id: string | null }>
+  > {
+    const result = await this.pool.query(
+      `SELECT ser.email,
+              (SELECT el.user_id FROM email_logs el
+                WHERE el.recipient_email = ser.email
+                ORDER BY el.sent_at DESC NULLS LAST
+                LIMIT 1) AS user_id
+         FROM sent_email_records ser
+        WHERE ser.is_valid = 'not_verified'
+          AND ser.type = 'sent'
+        ORDER BY ser.email ASC`
+    );
+    return result.rows;
+  }
+
   async updateScanStatus(sessionId: string, scanStatus: string) {
     await this.pool.query(
       `UPDATE email_sessions SET scan_status = $1 WHERE id = $2`,
@@ -290,6 +683,24 @@ export class HistoryRepository {
       [sessionId]
     );
     return result.rows;
+  }
+
+  /**
+   * Update the delivery validity of an address in sent_email_records.
+   * Used by the bounce scan: 'failed' when a bounce is detected, 'valid'
+   * when an email was confirmed delivered (no bounce in its thread).
+   * Only matches addresses that already exist in sent_email_records.
+   */
+  async updateRecordValidity(
+    email: string,
+    isValid: "valid" | "failed" | "not_verified"
+  ) {
+    await this.pool.query(
+      `UPDATE sent_email_records
+         SET is_valid = $1, updated_at = CURRENT_TIMESTAMP
+       WHERE email = $2`,
+      [isValid, email]
+    );
   }
 
   /**

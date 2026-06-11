@@ -13,7 +13,10 @@
     "dev": "nodemon src/server.ts",
     "fetch-sent-emails": "ts-node src/scripts/fetch-sent-emails.ts",
     "send-emails": "ts-node src/scripts/send-emails.ts",
-    "import-contacts-csv": "ts-node src/scripts/import-contacts-csv.ts"
+    "import-contacts-csv": "ts-node src/scripts/import-contacts-csv.ts",
+    "backfill-record-validity": "ts-node src/scripts/backfill-record-validity.ts",
+    "verify-all-records": "ts-node src/scripts/verify-all-records.ts",
+    "run-bounce-scan": "ts-node src/scripts/run-bounce-scan.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.48.1",

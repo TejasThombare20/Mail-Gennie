@@ -43,8 +43,8 @@ const app: Application = express();
 app.use(cookieParser());
 app.use(cors({
   origin : process.env.CLIENT_URL,
-  credentials: true, 
-  
+  credentials: true,
+
 }));
 app.use(express.json());
 

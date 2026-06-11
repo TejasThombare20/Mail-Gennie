@@ -1,8 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "./ui-component/Button";
+import { Input } from "./ui-component/Input";
 import {
   Mails,
   RefreshCw,
+  Search,
 } from "lucide-react";
 import {
   ColumnFiltersState,
@@ -50,11 +53,45 @@ const Historytable = () => {
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
   const [rowSelection, setRowSelection] = useState({});
+  const [searchQuery, setSearchQuery] = useState("");
+  const navigate = useNavigate();
 
-  const columns = getColumns({ setSelectedEmail });
+  const columns = getColumns({
+    setSelectedEmail,
+    onResponded: (sessionId: string) =>
+      navigate(`/dashboard/outreach/${sessionId}?mode=responded`),
+  });
+
+  // Client-side search across subject, template, recipient email/name,
+  // and global + local variable keys/values.
+  const filteredHistory = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return emailHistory;
+
+    const varMatches = (
+      vars?: Array<{ key?: string; value?: string }>
+    ): boolean =>
+      (vars || []).some(
+        (v) =>
+          v?.key?.toLowerCase().includes(q) ||
+          v?.value?.toLowerCase().includes(q)
+      );
+
+    return emailHistory.filter((session) => {
+      if (session.subject?.toLowerCase().includes(q)) return true;
+      if (session.template_name?.toLowerCase().includes(q)) return true;
+      if (varMatches(session.global_variables)) return true;
+
+      return (session.email_logs || []).some(
+        (log) =>
+          log.recipient_email?.toLowerCase().includes(q) ||
+          varMatches(log.local_variables)
+      );
+    });
+  }, [emailHistory, searchQuery]);
 
   const table = useReactTable({
-    data: emailHistory,
+    data: filteredHistory,
     columns,
     state: {
       expanded,
@@ -98,7 +135,16 @@ const Historytable = () => {
     <div className="p-6 space-y-6">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold">Email History</h1>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
+          <div className="relative w-72">
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search email, name, subject, variables..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-8"
+            />
+          </div>
           <Button
             variant="outline"
             size="sm"

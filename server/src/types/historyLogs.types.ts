@@ -13,6 +13,8 @@ export interface EmailSession {
   failed_count: number;
   status: string;
   scan_status: 'pending' | 'in_progress' | 'done';
+  // Session-level outreach info (interview scheduled, person who reached out, etc.)
+  outreach_details?: Record<string, any>;
   started_at: Date;
   completed_at: Date | null;
   created_at: Date;
@@ -31,6 +33,8 @@ export interface EmailLogEntry {
   global_variables: variable[];
   subject: string;
   status: string;
+  // Per-recipient user-level action flags (responded, referred, etc.)
+  user_actions?: Record<string, any>;
   sent_at: Date;
   last_updated: Date;
 }

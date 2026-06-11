@@ -23,9 +23,53 @@ import { OAuth2Client } from "google-auth-library";
 import { TokenRepository } from "../repository/token.repository";
 import { HistoryRepository } from "../repository/history.repository";
 import logger from "../utils/logger";
-import pool from "../config/database";
 
 const MAILER_DAEMON = "mailer-daemon@googlemail.com";
+
+/**
+ * Broad heuristic to decide whether a "From" header (and optionally a "Subject")
+ * indicates a delivery-failure / bounce notification, across mail providers.
+ *
+ * Catches:
+ *   - mailer-daemon@<anything>         (Gmail, Google Workspace, etc.)
+ *   - postmaster@<anything>            (Exchange/Outlook, many SMTP servers)
+ *   - "Mail Delivery Subsystem"        display name
+ *   - "Mail Delivery System"           (Postfix wording)
+ *   - "Delivery Status Notification (Failure)"  in the From or Subject
+ *   - common bounce/undeliverable wording in the subject
+ */
+function isBounceSignal(fromHeader: string, subjectHeader = ""): boolean {
+  const from = fromHeader.toLowerCase();
+  const subject = subjectHeader.toLowerCase();
+
+  // From-header local-parts / display names that signal a daemon
+  if (
+    from.includes("mailer-daemon@") ||
+    from.includes("postmaster@") ||
+    from.includes(MAILER_DAEMON) ||
+    from.includes("mail delivery subsystem") ||
+    from.includes("mail delivery system")
+  ) {
+    return true;
+  }
+
+  // Subject / from wording that signals a failure notification
+  const failurePhrases = [
+    "delivery status notification (failure)",
+    "delivery status notification",
+    "undeliverable",
+    "undelivered mail returned",
+    "returned mail",
+    "failure notice",
+    "mail delivery failed",
+    "address not found",
+    "delivery has failed",
+  ];
+
+  return failurePhrases.some(
+    (phrase) => subject.includes(phrase) || from.includes(phrase)
+  );
+}
 
 export class BounceScanService {
   constructor(
@@ -196,6 +240,68 @@ export class BounceScanService {
   }
 
   /**
+   * Public wrapper to build a Gmail client for a given user.
+   * Used by the per-address verification script.
+   */
+  async getGmailClientForUser(userId: string): Promise<gmail_v1.Gmail> {
+    return this.getGmailClient(userId);
+  }
+
+  /**
+   * Verify a single address directly against Gmail (no session/time window).
+   * Searches for ANY thread to the address and checks it for a bounce.
+   *
+   * Returns:
+   *   'failed'        — a bounce/failure message exists in the thread to this address
+   *   'valid'         — a thread exists and contains no bounce (delivered)
+   *   'not_verified'  — no Gmail thread found for the address (can't conclude)
+   */
+  async verifyAddressValidity(
+    gmail: gmail_v1.Gmail,
+    email: string
+  ): Promise<"valid" | "failed" | "not_verified"> {
+    const listRes = await gmail.users.messages.list({
+      userId: "me",
+      q: `to:${email}`,
+      maxResults: 10,
+    });
+
+    const messages = listRes.data.messages ?? [];
+    if (messages.length === 0) {
+      // No thread at all → cannot conclude delivery; leave as not_verified.
+      return "not_verified";
+    }
+
+    const checkedThreads = new Set<string>();
+    for (const msg of messages) {
+      const msgDetail = await gmail.users.messages.get({
+        userId: "me",
+        id: msg.id!,
+        format: "metadata",
+        metadataHeaders: ["To", "From", "Subject"],
+      });
+
+      const fromHeader = msgDetail.data.payload?.headers
+        ?.find((h) => h.name?.toLowerCase() === "from")
+        ?.value?.toLowerCase() ?? "";
+      const subjectHeader = msgDetail.data.payload?.headers
+        ?.find((h) => h.name?.toLowerCase() === "subject")
+        ?.value ?? "";
+
+      if (isBounceSignal(fromHeader, subjectHeader)) return "failed";
+
+      const threadId = msgDetail.data.threadId;
+      if (threadId && !checkedThreads.has(threadId)) {
+        checkedThreads.add(threadId);
+        if (await this.threadHasBounce(gmail, threadId)) return "failed";
+      }
+    }
+
+    // A thread exists and no bounce was found → the address delivered.
+    return "valid";
+  }
+
+  /**
    * Scan a single session: check each sent email for bounce replies.
    * Returns the number of bounces found.
    */
@@ -236,8 +342,19 @@ export class BounceScanService {
 
         if (isBounced) {
           await this.historyRepository.updateEmailLogStatus(log.id, "bounced");
+          // Mark this address as a confirmed delivery failure.
+          await this.historyRepository.updateRecordValidity(
+            log.recipient_email,
+            "failed"
+          );
           bouncesFound++;
           logger.info(`[BounceScan] BOUNCED: ${log.recipient_email} (log ${log.id})`);
+        } else {
+          // No bounce found in the thread → the address delivered successfully.
+          await this.historyRepository.updateRecordValidity(
+            log.recipient_email,
+            "valid"
+          );
         }
       } catch (err: any) {
         logger.warn(
@@ -305,7 +422,7 @@ export class BounceScanService {
         userId: "me",
         id: msg.id!,
         format: "metadata",
-        metadataHeaders: ["To", "From", "Date"],
+        metadataHeaders: ["To", "From", "Date", "Subject"],
       });
 
       const threadId = msgDetail.data.threadId;
@@ -316,11 +433,11 @@ export class BounceScanService {
       const fromHeader = msgDetail.data.payload?.headers
         ?.find((h) => h.name?.toLowerCase() === "from")
         ?.value?.toLowerCase() ?? "";
+      const subjectHeader = msgDetail.data.payload?.headers
+        ?.find((h) => h.name?.toLowerCase() === "subject")
+        ?.value ?? "";
 
-      if (
-        fromHeader.includes(MAILER_DAEMON) ||
-        fromHeader.includes("mail delivery subsystem")
-      ) {
+      if (isBounceSignal(fromHeader, subjectHeader)) {
         logger.info(`[BounceScan] Direct bounce message found for ${recipientEmail}`);
         return true;
       }
@@ -358,7 +475,7 @@ export class BounceScanService {
       userId: "me",
       id: threadId,
       format: "metadata",
-      metadataHeaders: ["From"],
+      metadataHeaders: ["From", "Subject"],
     });
 
     const threadMessages = threadRes.data.messages ?? [];
@@ -368,11 +485,11 @@ export class BounceScanService {
       const fromHeader = headers
         .find((h) => h.name?.toLowerCase() === "from")
         ?.value?.toLowerCase() ?? "";
+      const subjectHeader = headers
+        .find((h) => h.name?.toLowerCase() === "subject")
+        ?.value ?? "";
 
-      if (
-        fromHeader.includes(MAILER_DAEMON) ||
-        fromHeader.includes("mail delivery subsystem")
-      ) {
+      if (isBounceSignal(fromHeader, subjectHeader)) {
         return true;
       }
     }

@@ -72,7 +72,8 @@
  *        - "AI-powered finance platform"           → reads: "doing in AI-powered finance platform"
  *        - "empowering enterprises to outcomes"   → ungrammatical
  *        - "payments"                              → too terse, no substance
- *    - Job ID: Job posting ID from the portal (MANDATORY for template 1 only)
+ *    - Job ID / Job link: For template 1 (Referral Request), AT LEAST ONE of the
+ *      Job ID (--jobId) or the job link (--portalLink) is required — provide either or both.
  *    - Sender email / --from (optional) — defaults to "iamtejasthombare18@gmail.com".
  *      Do NOT ask the user for the sender email if not provided; use the default.
  *    - Role (optional, defaults to "SDE")
@@ -197,8 +198,8 @@
  *    - The --portalLink is mandatory and should be a clickable URL.
  *    - The --portalName is optional (defaults to "LinkedIn post"). MANDATORY for templates 2 & 3.
  *      This is used for the {{portal_name}} placeholder in email templates.
- *    - The --jobId is MANDATORY for template 1 only. Used for {{JOB_ID}} placeholder.
- *      For templates 2 & 3, --jobId is optional.
+ *    - For template 1, at least ONE of --jobId or --portalLink is required (either or both).
+ *      --jobId is used for the {{JOB_ID}} placeholder. For templates 2 & 3, --jobId is optional.
  *    - The --subject supports template variables: {{receiver_name}}, {{company_name}},
  *      {{ROLE}}, {{portal_link}}, {{portal_name}}, {{JOB_ID}}, {{product_info}}.
  *      These get replaced per-recipient.
@@ -232,10 +233,12 @@
  *   CONDITIONALLY MANDATORY:
  *   ───────────────────────
  *   --portalLink   URL to job posting, LinkedIn post, or career portal.
- *                  REQUIRED for templates 2 & 3. OPTIONAL for template 1 (Referral Request).
+ *                  REQUIRED for templates 2 & 3.
+ *                  For template 1, REQUIRED only if --jobId is not provided (at least one needed).
  *                  NOT NEEDED for template 4 (General Opportunity Exploration).
  *                  e.g., "https://linkedin.com/jobs/view/123"
- *   --jobId        Job posting ID for {{JOB_ID}} placeholder. REQUIRED for templates 1 & 5.
+ *   --jobId        Job posting ID for {{JOB_ID}} placeholder. REQUIRED for template 5.
+ *                  For template 1, REQUIRED only if --portalLink is not provided (at least one needed).
  *                  Optional for templates 2 & 3.
  *   --productInfo  Value for the {{product_info}} placeholder in template 4. REQUIRED for template 4.
  *                  Must read naturally after "doing in" — Claude expands the user's hint into a full phrase.
@@ -413,7 +416,7 @@ function parseArgs(): ParsedArgs {
   let jobId = "";
   let subject = "";
   let role = ROLE_DEFAULT;
-  let template = TEMPLATE_DEFAULT;        
+  let template = TEMPLATE_DEFAULT;
   let from = FROM_DEFAULT;
 
   for (let i = 0; i < args.length; i++) {
@@ -428,7 +431,7 @@ function parseArgs(): ParsedArgs {
     } else if (args[i] === "--productInfo" && args[i + 1]) {
       productInfo = args[++i];
     } else if (args[i] === "--jobId" && args[i + 1]) {
-      jobId = "job link :" + "( " + args[++i] + " )";
+      jobId = "job ID :" + "( " + args[++i] + " )";
     } else if (args[i] === "--subject" && args[i + 1]) {
       subject = args[++i];
     } else if (args[i] === "--role" && args[i + 1]) {
@@ -464,8 +467,9 @@ function parseArgs(): ParsedArgs {
   }
 
   // Validate template-specific required parameters
-  if (template === 1 && !jobId) {
-    console.error("Error: --jobId is REQUIRED for template 1 (Referral Request).");
+  // Template 1 (Referral Request): EITHER a Job ID OR a job link is required (at least one).
+  if (template === 1 && !jobId && !portalLink) {
+    console.error("Error: template 1 (Referral Request) requires at least one of --jobId or --portalLink (job link).");
     process.exit(1);
   }
 
