@@ -1,0 +1,28 @@
+{
+  "name": "@app/shared",
+  "version": "1.0.0",
+  "description": "Shared library: config, logger, db pool (singleton), Gmail client factory, bounce detection, repositories, types",
+  "license": "ISC",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "google-auth-library": "^9.15.0",
+    "googleapis": "^144.0.0",
+    "pg": "^8.13.1",
+    "uuid": "^11.0.5",
+    "winston": "^3.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/pg": "^8.11.11",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.7.3"
+  }
+}

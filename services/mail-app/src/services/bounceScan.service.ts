@@ -17,160 +17,37 @@
  * ============================================================================
  */
 
-import { google } from "googleapis";
 import { gmail_v1 } from "googleapis";
-import { OAuth2Client } from "google-auth-library";
-import { TokenRepository } from "../repository/token.repository";
+import {
+  TokenRepository,
+  GmailClientFactory,
+  bounceSignalDetector,
+  logger,
+} from "@app/shared";
 import { HistoryRepository } from "../repository/history.repository";
-import logger from "../utils/logger";
-
-const MAILER_DAEMON = "mailer-daemon@googlemail.com";
 
 /**
- * Broad heuristic to decide whether a "From" header (and optionally a "Subject")
- * indicates a delivery-failure / bounce notification, across mail providers.
- *
- * Catches:
- *   - mailer-daemon@<anything>         (Gmail, Google Workspace, etc.)
- *   - postmaster@<anything>            (Exchange/Outlook, many SMTP servers)
- *   - "Mail Delivery Subsystem"        display name
- *   - "Mail Delivery System"           (Postfix wording)
- *   - "Delivery Status Notification (Failure)"  in the From or Subject
- *   - common bounce/undeliverable wording in the subject
+ * Thin wrapper kept for readability at call sites: delegates to the shared
+ * bounce-signal detector (Strategy), extracted into @app/shared.
  */
 function isBounceSignal(fromHeader: string, subjectHeader = ""): boolean {
-  const from = fromHeader.toLowerCase();
-  const subject = subjectHeader.toLowerCase();
-
-  // From-header local-parts / display names that signal a daemon
-  if (
-    from.includes("mailer-daemon@") ||
-    from.includes("postmaster@") ||
-    from.includes(MAILER_DAEMON) ||
-    from.includes("mail delivery subsystem") ||
-    from.includes("mail delivery system")
-  ) {
-    return true;
-  }
-
-  // Subject / from wording that signals a failure notification
-  const failurePhrases = [
-    "delivery status notification (failure)",
-    "delivery status notification",
-    "undeliverable",
-    "undelivered mail returned",
-    "returned mail",
-    "failure notice",
-    "mail delivery failed",
-    "address not found",
-    "delivery has failed",
-  ];
-
-  return failurePhrases.some(
-    (phrase) => subject.includes(phrase) || from.includes(phrase)
-  );
+  return bounceSignalDetector.isBounce(fromHeader, subjectHeader);
 }
 
 export class BounceScanService {
+  private readonly gmailClientFactory: GmailClientFactory;
+
   constructor(
     private tokenRepository: TokenRepository,
     private historyRepository: HistoryRepository
-  ) {}
-
-  /**
-   * Build a fresh OAuth2Client per user, with token refresh + probe fallback.
-   * Follows the same strategy as fetch-sent-emails.ts:
-   *   1. Access token still valid → use directly
-   *   2. Access token expired + refresh token → try refresh
-   *   3. Refresh fails (invalid_grant) → probe stored access token
-   *   4. Probe fails → throw (user must re-auth)
-   */
-  private async getGmailClient(userId: string): Promise<gmail_v1.Gmail> {
-    const userToken = await this.tokenRepository.getUserToken(userId);
-    if (!userToken) {
-      throw new Error(`No tokens found for user ${userId}`);
-    }
-
-    // Fresh client per user — avoids shared credential overwrites
-    const oauth2Client = new OAuth2Client({
-      clientId: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      redirectUri: process.env.GOOGLE_REDIRECT_URI,
-    });
-
-    const isExpired =
-      !userToken.token_expiry ||
-      new Date(userToken.token_expiry) <= new Date(Date.now() + 5 * 60 * 1000);
-
-    // Step 1: token still valid
-    if (!isExpired) {
-      logger.info(`[BounceScan] Access token valid for user ${userId}`);
-      oauth2Client.setCredentials({
-        access_token: userToken.google_token,
-        refresh_token: userToken.refresh_token ?? undefined,
-      });
-      return google.gmail({ version: "v1", auth: oauth2Client });
-    }
-
-    // Step 2: try refresh
-    logger.info(`[BounceScan] Access token expired for user ${userId}, attempting refresh`);
-
-    if (!userToken.refresh_token) {
-      logger.warn(`[BounceScan] No refresh token for user ${userId}, probing stored access token`);
-      return this.probeAndReturnGmail(oauth2Client, userToken.google_token, userId);
-    }
-
-    try {
-      oauth2Client.setCredentials({ refresh_token: userToken.refresh_token });
-      const { credentials } = await oauth2Client.refreshAccessToken();
-      oauth2Client.setCredentials(credentials);
-
-      // Persist new tokens
-      await this.tokenRepository.saveUserToken(
-        userId,
-        credentials.access_token!,
-        new Date(credentials.expiry_date!),
-        credentials.refresh_token ?? userToken.refresh_token
-      );
-
-      logger.info(`[BounceScan] Token refreshed for user ${userId}`);
-      return google.gmail({ version: "v1", auth: oauth2Client });
-    } catch (refreshErr: any) {
-      const isInvalidGrant =
-        refreshErr?.message?.includes("invalid_grant") ||
-        refreshErr?.response?.data?.error === "invalid_grant";
-
-      if (isInvalidGrant) {
-        logger.warn(
-          `[BounceScan] Refresh token invalid_grant for user ${userId}, probing stored access token`
-        );
-        return this.probeAndReturnGmail(oauth2Client, userToken.google_token, userId);
-      }
-      throw refreshErr;
-    }
+  ) {
+    // OAuth / token-refresh / probe now lives in the shared Factory.
+    this.gmailClientFactory = new GmailClientFactory(this.tokenRepository);
   }
 
-  /**
-   * Last resort: set the stored access token and probe Gmail to check if it still works.
-   * Google sometimes accepts tokens past their stated expiry.
-   */
-  private async probeAndReturnGmail(
-    oauth2Client: OAuth2Client,
-    accessToken: string,
-    userId: string
-  ): Promise<gmail_v1.Gmail> {
-    oauth2Client.setCredentials({ access_token: accessToken });
-    const gmail = google.gmail({ version: "v1", auth: oauth2Client });
-    try {
-      await gmail.users.getProfile({ userId: "me" });
-      logger.info(`[BounceScan] Stored access token still accepted for user ${userId}`);
-      return gmail;
-    } catch(error) {
-      logger.error(`Error probing access token for user ${userId}: ${error}`);
-      throw new Error(
-        `All tokens invalid for user ${userId}. User must re-authenticate through the app.`
-      );
-    }
+  /** Build an authenticated Gmail client via the shared factory. */
+  private async getGmailClient(userId: string): Promise<gmail_v1.Gmail> {
+    return this.gmailClientFactory.createForUser(userId);
   }
 
   /**

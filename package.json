@@ -1,0 +1,20 @@
+{
+  "name": "mail-app-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mail-app monorepo: HTTP API, queue worker, pub/sub consumer, and shared library",
+  "workspaces": [
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3"
+  },
+  "packageManager": "npm@9.2.0"
+}
