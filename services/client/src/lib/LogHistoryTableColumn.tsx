@@ -143,7 +143,7 @@ export const getColumns = ({
       cell: ({ row }) => {
         if (row.depth > 0) return null;
         const anyResponded = (row.original.email_logs || []).some(
-          (l: any) => l?.user_actions?.responded
+          (l: any) => (l?.user_actions?.mail_replied?.length ?? 0) > 0
         );
         return (
           <DropdownMenu>

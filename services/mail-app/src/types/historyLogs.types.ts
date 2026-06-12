@@ -1,5 +1,31 @@
 import { variable } from "./template.types";
 
+// One auto/manual reply captured for a recipient (stored in user_actions.mail_replied).
+export interface ReplyEntry {
+  response_message: string;
+  responded_at: string;
+  source: "auto" | "manual";
+}
+
+// Per-recipient actions namespace (email_logs.user_actions).
+export interface UserActions {
+  mail_replied?: ReplyEntry[];
+}
+
+// One person who scheduled / set up an interview (stored in actions.outreach).
+export interface OutreachPerson {
+  id: string;
+  interview_scheduler_name: string;
+  email: string;
+  contact_number: string;
+  company?: string;
+}
+
+// Session-level actions namespace (email_sessions.actions).
+export interface SessionActions {
+  outreach?: OutreachPerson[];
+}
+
 // Represents a single email_sessions row
 export interface EmailSession {
   id: string;
@@ -13,8 +39,8 @@ export interface EmailSession {
   failed_count: number;
   status: string;
   scan_status: 'pending' | 'in_progress' | 'done';
-  // Session-level outreach info (interview scheduled, person who reached out, etc.)
-  outreach_details?: Record<string, any>;
+  // Session-level actions, namespaced by type (e.g. { outreach: [...] }).
+  actions?: SessionActions;
   started_at: Date;
   completed_at: Date | null;
   created_at: Date;
@@ -33,8 +59,8 @@ export interface EmailLogEntry {
   global_variables: variable[];
   subject: string;
   status: string;
-  // Per-recipient user-level action flags (responded, referred, etc.)
-  user_actions?: Record<string, any>;
+  // Per-recipient actions, namespaced by type (e.g. { mail_replied: [...] }).
+  user_actions?: UserActions;
   sent_at: Date;
   last_updated: Date;
 }

@@ -1,4 +1,5 @@
 import { GlobalTemplateVariable, TemplateVariable } from "./template-types";
+import { UserActions } from "./outreach";
 
 // Per-recipient email log entry
 export interface EmailLogEntry {
@@ -7,7 +8,7 @@ export interface EmailLogEntry {
   recipient_email: string;
   local_variables: TemplateVariable[];
   status: string;
-  user_actions?: Record<string, any>;
+  user_actions?: UserActions;
   sent_at: string;
   last_updated: string;
 }

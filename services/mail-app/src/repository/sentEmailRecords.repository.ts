@@ -78,6 +78,28 @@ export class SentEmailRecordsRepository {
     }
   }
 
+  /**
+   * Upsert a 'sent' delivery record. is_valid resets to 'not_verified' so the
+   * bounce/reply pipeline re-checks the address on a re-send. Mirrors the shared
+   * SendJobRepository.upsertSentRecord used by the queue worker (this one serves
+   * the legacy direct-send path in EmailService).
+   */
+  async upsertSent(
+    firstName: string,
+    email: string,
+    companyName: string | null
+  ): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO sent_email_records (first_name, email, company_name, sent_at, type, is_valid)
+       VALUES ($1, $2, $3, NOW(), 'sent', 'not_verified')
+       ON CONFLICT (email) DO UPDATE
+         SET type     = 'sent',
+             sent_at  = EXCLUDED.sent_at,
+             is_valid = 'not_verified'`,
+      [firstName, email, companyName]
+    );
+  }
+
   async getCompanies(): Promise<string[]> {
     try {
       const result = await this.pool.query(

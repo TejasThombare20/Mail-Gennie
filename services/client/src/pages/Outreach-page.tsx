@@ -4,7 +4,7 @@ import apiHandler from "../handlers/api-handler";
 import { useHandleApiError } from "../handlers/useErrorToast";
 import { useSuccessToast } from "../handlers/use-success-toast";
 import { useToast } from "../components/ui-component/Use-toast";
-import { OutreachSession, Interviewer, OutreachRecipient } from "../types/outreach";
+import { OutreachSession, OutreachPerson, OutreachRecipient, ReplyEntry } from "../types/outreach";
 import {
   Card,
   CardContent,
@@ -65,17 +65,18 @@ const OutreachPage = () => {
   const [error, setError] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // ── Interview list state ────────────────────────────────────────────
-  const [interviewers, setInterviewers] = useState<Interviewer[]>([]);
+  // ── Interview / outreach list state ─────────────────────────────────
+  const [outreach, setOutreach] = useState<OutreachPerson[]>([]);
   const [interviewDialogOpen, setInterviewDialogOpen] = useState(false);
-  const [editingInterviewer, setEditingInterviewer] = useState<Interviewer | null>(null);
+  const [editingPerson, setEditingPerson] = useState<OutreachPerson | null>(null);
   const [ivName, setIvName] = useState("");
   const [ivNumber, setIvNumber] = useState("");
   const [ivEmail, setIvEmail] = useState("");
 
   // ── Responded list state ────────────────────────────────────────────
   const [respDialogOpen, setRespDialogOpen] = useState(false);
-  const [editingLogId, setEditingLogId] = useState<string>("");
+  // When editing, the manual mail_replied index being edited; "" = adding new.
+  const [editingReply, setEditingReply] = useState<{ logId: string; index: number } | null>(null);
   const [selectedLogId, setSelectedLogId] = useState<string>("");
   const [responseMessage, setResponseMessage] = useState("");
 
@@ -89,23 +90,11 @@ const OutreachPage = () => {
       if (res.success && res.data) {
         setSession(res.data);
 
-        // Normalise interviewers: prefer the array; fall back to legacy single reachout.
-        const details = res.data.outreach_details ?? {};
-        let list: Interviewer[] = Array.isArray(details.interviewers)
-          ? details.interviewers
+        // Read the outreach people from the namespaced actions.outreach array.
+        const list: OutreachPerson[] = Array.isArray(res.data.actions?.outreach)
+          ? res.data.actions.outreach
           : [];
-        if (list.length === 0 && details.reachout?.name) {
-          list = [
-            {
-              id: newId(),
-              name: details.reachout.name ?? "",
-              number: details.reachout.number ?? "",
-              email: details.reachout.email ?? "",
-              company: details.reachout.company ?? "",
-            },
-          ];
-        }
-        setInterviewers(list);
+        setOutreach(list);
       } else {
         setError(true);
       }
@@ -133,24 +122,26 @@ const OutreachPage = () => {
   const jobId = useMemo(() => getGlobalVar(session, "JOB_ID"), [session]);
   const postName = useMemo(() => getGlobalVar(session, "portal_name"), [session]);
 
-  // Recipients who have responded (derived from logs)
+  // Recipients who have responded (derived from logs: any mail_replied entry).
   const responders = useMemo(
     () =>
-      (session?.recipients ?? []).filter((r) => r.user_actions?.responded),
+      (session?.recipients ?? []).filter(
+        (r) => (r.user_actions?.mail_replied?.length ?? 0) > 0
+      ),
     [session]
   );
 
-  // ── Interviewer CRUD (persists the whole list) ───────────────────────
-  const persistInterviewers = async (list: Interviewer[]) => {
+  // ── Outreach CRUD (persists the whole list) ──────────────────────────
+  const persistOutreach = async (list: OutreachPerson[]) => {
     if (!sessionId) return;
     try {
       setSaving(true);
       const res = await apiHandler.put(
-        `/api/loghistory/session/${sessionId}/interviewers`,
-        { interviewers: list }
+        `/api/loghistory/session/${sessionId}/outreach-list`,
+        { outreach: list }
       );
       if (res.success) {
-        setInterviewers(list);
+        setOutreach(list);
         showSuccessToast("Interview details saved.");
       }
     } catch (err: any) {
@@ -161,18 +152,18 @@ const OutreachPage = () => {
   };
 
   const openAddInterviewer = () => {
-    setEditingInterviewer(null);
+    setEditingPerson(null);
     setIvName("");
     setIvNumber("");
     setIvEmail("");
     setInterviewDialogOpen(true);
   };
 
-  const openEditInterviewer = (iv: Interviewer) => {
-    setEditingInterviewer(iv);
-    setIvName(iv.name);
-    setIvNumber(iv.number);
-    setIvEmail(iv.email);
+  const openEditInterviewer = (p: OutreachPerson) => {
+    setEditingPerson(p);
+    setIvName(p.interview_scheduler_name);
+    setIvNumber(p.contact_number);
+    setIvEmail(p.email);
     setInterviewDialogOpen(true);
   };
 
@@ -185,36 +176,54 @@ const OutreachPage = () => {
       });
       return;
     }
-    const entry: Interviewer = {
-      id: editingInterviewer?.id ?? newId(),
-      name: ivName.trim(),
-      number: ivNumber.trim(),
+    const entry: OutreachPerson = {
+      id: editingPerson?.id ?? newId(),
+      interview_scheduler_name: ivName.trim(),
+      contact_number: ivNumber.trim(),
       email: ivEmail.trim(),
       company,
     };
-    const list = editingInterviewer
-      ? interviewers.map((i) => (i.id === entry.id ? entry : i))
-      : [...interviewers, entry];
-    await persistInterviewers(list);
+    const list = editingPerson
+      ? outreach.map((i) => (i.id === entry.id ? entry : i))
+      : [...outreach, entry];
+    await persistOutreach(list);
     setInterviewDialogOpen(false);
   };
 
   const deleteInterviewer = async (id: string) => {
-    await persistInterviewers(interviewers.filter((i) => i.id !== id));
+    await persistOutreach(outreach.filter((i) => i.id !== id));
   };
 
-  // ── Responder CRUD (per-recipient log user_actions) ──────────────────
+  // ── Responder CRUD (per-recipient user_actions.mail_replied[]) ────────
+  // Persist the full mail_replied array for one recipient's log.
+  const persistReplies = async (
+    logId: number,
+    mailReplied: ReplyEntry[]
+  ): Promise<boolean> => {
+    const res = await apiHandler.patch(
+      `/api/loghistory/log/${logId}/actions`,
+      { mail_replied: mailReplied }
+    );
+    return !!res.success;
+  };
+
+  const repliesFor = (logId: string): ReplyEntry[] => {
+    const r = session?.recipients.find((x) => String(x.id) === logId);
+    return r?.user_actions?.mail_replied ?? [];
+  };
+
   const openAddResponder = () => {
-    setEditingLogId("");
+    setEditingReply(null);
     setSelectedLogId("");
     setResponseMessage("");
     setRespDialogOpen(true);
   };
 
-  const openEditResponder = (r: OutreachRecipient) => {
-    setEditingLogId(String(r.id));
+  // Edit a specific manual reply entry on a recipient.
+  const openEditResponder = (r: OutreachRecipient, index: number) => {
+    setEditingReply({ logId: String(r.id), index });
     setSelectedLogId(String(r.id));
-    setResponseMessage(r.user_actions?.response_message ?? "");
+    setResponseMessage(r.user_actions?.mail_replied?.[index]?.response_message ?? "");
     setRespDialogOpen(true);
   };
 
@@ -229,11 +238,24 @@ const OutreachPage = () => {
     }
     try {
       setSaving(true);
-      const res = await apiHandler.patch(
-        `/api/loghistory/log/${selectedLogId}/actions`,
-        { actions: { responded: true, response_message: responseMessage.trim() } }
-      );
-      if (res.success) {
+      const existing = repliesFor(selectedLogId);
+      const entry: ReplyEntry = {
+        response_message: responseMessage.trim(),
+        responded_at: new Date().toISOString(),
+        source: "manual",
+      };
+      let next: ReplyEntry[];
+      if (editingReply) {
+        next = existing.map((e, i) =>
+          i === editingReply.index
+            ? { ...entry, responded_at: e.responded_at }
+            : e
+        );
+      } else {
+        next = [...existing, entry];
+      }
+      const ok = await persistReplies(Number(selectedLogId), next);
+      if (ok) {
         showSuccessToast("Response saved.");
         setRespDialogOpen(false);
         await loadSession();
@@ -245,14 +267,14 @@ const OutreachPage = () => {
     }
   };
 
-  const deleteResponder = async (logId: number) => {
+  // Remove one reply entry (by index) from a recipient's mail_replied list.
+  const deleteResponder = async (logId: number, index: number) => {
     try {
       setSaving(true);
-      const res = await apiHandler.patch(
-        `/api/loghistory/log/${logId}/actions`,
-        { actions: { responded: false, response_message: "" } }
-      );
-      if (res.success) {
+      const existing = repliesFor(String(logId));
+      const next = existing.filter((_, i) => i !== index);
+      const ok = await persistReplies(logId, next);
+      if (ok) {
         showSuccessToast("Response removed.");
         await loadSession();
       }
@@ -269,9 +291,20 @@ const OutreachPage = () => {
       <ErrorState message="Unable to load session details. Please go back and retry." />
     );
 
-  // Recipients available to add as responders (not already responded)
-  const availableRecipients = session.recipients.filter(
-    (r) => String(r.id) === editingLogId || !r.user_actions?.responded
+  // Recipients available to add a response for. When adding a NEW reply, any
+  // recipient is allowed (a recipient can reply more than once). When editing,
+  // lock to the recipient being edited.
+  const availableRecipients = editingReply
+    ? session.recipients.filter((r) => String(r.id) === editingReply.logId)
+    : session.recipients;
+
+  // Flatten responders -> one row per reply entry, for the "Who responded" table.
+  const responderRows = responders.flatMap((r) =>
+    (r.user_actions?.mail_replied ?? []).map((entry, index) => ({
+      recipient: r,
+      entry,
+      index,
+    }))
   );
 
   return (
@@ -350,17 +383,17 @@ const OutreachPage = () => {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {interviewers.length === 0 ? (
+                  {outreach.length === 0 ? (
                     <TableRow>
                       <TableCell colSpan={4} className="h-20 text-center text-muted-foreground">
                         No one added yet. Click "Add person" to start.
                       </TableCell>
                     </TableRow>
                   ) : (
-                    interviewers.map((iv) => (
+                    outreach.map((iv) => (
                       <TableRow key={iv.id}>
-                        <TableCell className="font-medium">{iv.name || "-"}</TableCell>
-                        <TableCell>{iv.number || "-"}</TableCell>
+                        <TableCell className="font-medium">{iv.interview_scheduler_name || "-"}</TableCell>
+                        <TableCell>{iv.contact_number || "-"}</TableCell>
                         <TableCell>{iv.email || "-"}</TableCell>
                         <TableCell className="text-right">
                           <Button
@@ -409,29 +442,44 @@ const OutreachPage = () => {
                   <TableRow>
                     <TableHead>Recipient</TableHead>
                     <TableHead>Message</TableHead>
+                    <TableHead>When</TableHead>
+                    <TableHead>Source</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {responders.length === 0 ? (
+                  {responderRows.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={3} className="h-20 text-center text-muted-foreground">
+                      <TableCell colSpan={5} className="h-20 text-center text-muted-foreground">
                         No responses recorded yet. Click "Add response".
                       </TableCell>
                     </TableRow>
                   ) : (
-                    responders.map((r) => (
-                      <TableRow key={r.id}>
-                        <TableCell className="font-medium">{r.recipient_email}</TableCell>
-                        <TableCell className="max-w-[320px] truncate">
-                          {r.user_actions?.response_message || "-"}
+                    responderRows.map(({ recipient, entry, index }) => (
+                      <TableRow key={`${recipient.id}-${index}`}>
+                        <TableCell className="font-medium">{recipient.recipient_email}</TableCell>
+                        <TableCell className="max-w-[280px] truncate">
+                          {entry.response_message || "-"}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                          {entry.responded_at ? formatDate(entry.responded_at) : "-"}
+                        </TableCell>
+                        <TableCell>
+                          <Badge
+                            variant={entry.source === "auto" ? "secondary" : "outline"}
+                            className="text-xs"
+                          >
+                            {entry.source === "auto" ? "Auto" : "Manual"}
+                          </Badge>
                         </TableCell>
                         <TableCell className="text-right">
+                          {/* Auto entries are captured by the system and read-only. */}
                           <Button
                             variant="ghost"
                             size="icon"
                             className="h-8 w-8"
-                            onClick={() => openEditResponder(r)}
+                            disabled={entry.source === "auto"}
+                            onClick={() => openEditResponder(recipient, index)}
                           >
                             <Pencil className="h-4 w-4" />
                           </Button>
@@ -440,7 +488,7 @@ const OutreachPage = () => {
                             size="icon"
                             className="h-8 w-8 text-red-600"
                             disabled={saving}
-                            onClick={() => deleteResponder(r.id)}
+                            onClick={() => deleteResponder(recipient.id, index)}
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
@@ -458,7 +506,7 @@ const OutreachPage = () => {
       {/* Interviewer add/edit dialog */}
       <DialogModel
         DialogSizeClass="max-w-md"
-        title={editingInterviewer ? "Edit person" : "Add person"}
+        title={editingPerson ? "Edit person" : "Add person"}
         description="Person who reached out / scheduled the interview."
         TriggerElement={""}
         isOpen={interviewDialogOpen}
@@ -488,7 +536,7 @@ const OutreachPage = () => {
       {/* Responder add/edit dialog */}
       <DialogModel
         DialogSizeClass="max-w-md"
-        title={editingLogId ? "Edit response" : "Add response"}
+        title={editingReply ? "Edit response" : "Add response"}
         description="Recipient who responded and their message."
         TriggerElement={""}
         isOpen={respDialogOpen}
@@ -499,7 +547,7 @@ const OutreachPage = () => {
             <Select
               value={selectedLogId}
               onValueChange={setSelectedLogId}
-              disabled={!!editingLogId}
+              disabled={!!editingReply}
             >
               <SelectTrigger>
                 <SelectValue placeholder="Select a recipient" />

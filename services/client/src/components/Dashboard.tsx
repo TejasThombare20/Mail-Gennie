@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { OutreachPerson } from "../types/outreach";
 import apiHandler from "../handlers/api-handler";
 import { useHandleApiError } from "../handlers/useErrorToast";
 import DialogModel from "./Dialog-model";
@@ -99,7 +100,7 @@ interface SessionRow {
   created_at: string;
   duration_seconds: number | null;
   recipient_companies: string[];
-  outreach_details: Record<string, any>;
+  actions: { outreach?: OutreachPerson[] };
 }
 
 interface PaginatedSessions {
@@ -681,16 +682,16 @@ const Dashboard = () => {
                                 )
                               }
                             >
-                              {session.outreach_details?.interview_scheduled ? (
+                              {(session.actions?.outreach?.length ?? 0) > 0 ? (
                                 <CheckSquare className="h-4 w-4 text-green-600" />
                               ) : (
                                 <Square className="h-4 w-4" />
                               )}
-                              {session.outreach_details?.interview_scheduled
+                              {(session.actions?.outreach?.length ?? 0) > 0
                                 ? "Interview scheduled ✓ (edit)"
                                 : "Interview scheduled?"}
                             </DropdownMenuItem>
-                            {session.outreach_details?.interview_scheduled && (
+                            {(session.actions?.outreach?.length ?? 0) > 0 && (
                               <DropdownMenuItem
                                 onClick={() => setDetailsSession(session)}
                               >
@@ -756,26 +757,20 @@ const Dashboard = () => {
       >
         {detailsSession ? (
           (() => {
-            const od = detailsSession.outreach_details ?? {};
-            const people: any[] =
-              Array.isArray(od.interviewers) && od.interviewers.length > 0
-                ? od.interviewers
-                : od.reachout?.name
-                ? [od.reachout]
-                : [];
+            const people: OutreachPerson[] = detailsSession.actions?.outreach ?? [];
             return (
               <div className="space-y-3 text-sm">
                 <DetailRow
                   label="Interview scheduled"
-                  value={od.interview_scheduled ? "Yes" : "No"}
+                  value={people.length > 0 ? "Yes" : "No"}
                 />
                 {people.length === 0 ? (
                   <p className="text-muted-foreground">No people recorded.</p>
                 ) : (
                   people.map((p, i) => (
                     <div key={i} className="rounded-md border p-3 space-y-1">
-                      <DetailRow label="Name" value={p.name || "-"} />
-                      <DetailRow label="Contact number" value={p.number || "-"} />
+                      <DetailRow label="Name" value={p.interview_scheduler_name || "-"} />
+                      <DetailRow label="Contact number" value={p.contact_number || "-"} />
                       <DetailRow label="Contact email" value={p.email || "-"} />
                     </div>
                   ))

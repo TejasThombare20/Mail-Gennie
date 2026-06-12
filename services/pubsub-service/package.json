@@ -1,0 +1,30 @@
+{
+  "name": "@app/pubsub-service",
+  "version": "1.0.0",
+  "description": "Gmail Pub/Sub pull consumer: detects bounces and replies, renews watches, tracks historyId",
+  "license": "ISC",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "dev": "nodemon --watch src --ext ts --exec \"ts-node src/index.ts\"",
+    "renew-watches": "ts-node src/scripts/renew-watches.ts",
+    "arm-watch": "ts-node src/scripts/arm-watch.ts"
+  },
+  "dependencies": {
+    "@app/shared": "*",
+    "@google-cloud/pubsub": "^4.9.0",
+    "dotenv": "^16.4.7",
+    "googleapis": "^144.0.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/pg": "^8.11.11",
+    "nodemon": "^3.1.9",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3"
+  }
+}

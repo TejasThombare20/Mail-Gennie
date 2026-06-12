@@ -27,6 +27,25 @@ export class EnvConfig {
     redirectUri?: string;
   };
 
+  /** Which LLM provider the agents use. Selects the concrete LLMProvider impl. */
+  readonly llm: {
+    provider: string;
+  };
+
+  /** Gemini (Google AI) config for the first-name + product-info agents. */
+  readonly gemini: {
+    apiKey?: string;
+    model: string;
+  };
+
+  /** Gmail Pub/Sub watch config (shared so mail-app can auto-arm at login). */
+  readonly pubsub: {
+    /** Fully-qualified topic: projects/<PROJECT>/topics/<TOPIC>. */
+    topicName?: string;
+    /** Re-arm watches expiring within this many hours. */
+    watchRenewThresholdHours: number;
+  };
+
   readonly logLevel: string;
 
   private constructor() {
@@ -41,6 +60,19 @@ export class EnvConfig {
       clientId: process.env.GOOGLE_CLIENT_ID,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
       redirectUri: process.env.GOOGLE_REDIRECT_URI,
+    };
+    this.llm = {
+      provider: (process.env.LLM_PROVIDER || "gemini").toLowerCase(),
+    };
+    this.gemini = {
+      // Accept either GEMINI_API_KEY or GOOGLE_API_KEY (the SDK's default name).
+      apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
+      model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+    };
+    this.pubsub = {
+      topicName: process.env.GMAIL_PUBSUB_TOPIC,
+      watchRenewThresholdHours:
+        Number(process.env.WATCH_RENEW_THRESHOLD_HOURS) || 24,
     };
     this.logLevel = process.env.LOG_LEVEL || "http";
   }

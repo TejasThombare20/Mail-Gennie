@@ -79,6 +79,54 @@
  *    - Role (optional, defaults to "SDE")
  *    - Template type (optional, defaults to 1 - Referral Request)
  *    - Custom subject (optional, has a sensible default)
+ *    - Schedule time / --scheduleAt (OPTIONAL) — when provided, the batch is NOT
+ *      sent immediately; it is queued and sent at the given time. See the
+ *      "SCHEDULING MAILS" section below for the exact format and timezone rules.
+ *
+ *    SCHEDULING MAILS (--scheduleAt) — IMPORTANT, READ FULLY:
+ *    ────────────────────────────────────────────────────────
+ *    The system can schedule a batch for a future time. When the user asks to
+ *    "schedule", "send tomorrow at 9", "send at 9am", "send later", etc., pass
+ *    --scheduleAt. When the user does NOT mention any time, OMIT it (send now).
+ *
+ *    TIMEZONE — ALWAYS INDIAN STANDARD TIME (IST, UTC+05:30):
+ *      The user is in India. ANY time the user gives ("9am", "tomorrow 6pm",
+ *      "14:30") is INDIAN time (IST / Asia/Kolkata, UTC+05:30). You MUST treat
+ *      the user's wall-clock time as IST and pass it to --scheduleAt in this
+ *      exact form so there is no ambiguity:
+ *
+ *          --scheduleAt "YYYY-MM-DDTHH:mm:ss+05:30"
+ *
+ *      The trailing +05:30 is the IST offset and is MANDATORY — it tells the
+ *      server the instant unambiguously. Do NOT pass a bare local time without
+ *      the offset (it would be interpreted as the server's timezone / UTC and
+ *      fire at the wrong hour).
+ *
+ *      Examples (user is speaking IST):
+ *        - "send tomorrow at 9 AM"   and today is 2026-06-11
+ *              → --scheduleAt "2026-06-12T09:00:00+05:30"
+ *        - "send today at 6:30 PM"   (2026-06-11)
+ *              → --scheduleAt "2026-06-11T18:30:00+05:30"
+ *        - "schedule for 2 PM on 15 June"
+ *              → --scheduleAt "2026-06-15T14:00:00+05:30"
+ *
+ *      DATE RESOLUTION:
+ *        - Resolve relative dates ("today", "tomorrow", "next Monday") against
+ *          the CURRENT date in IST. If the resolved IST time is already in the
+ *          PAST, do not silently send — tell the user the time has passed and
+ *          ask for a future time.
+ *        - If the user gives only a time with no date (e.g. "at 9am"), assume the
+ *          NEXT occurrence of that time in IST (today if still upcoming, else
+ *          tomorrow).
+ *
+ *      BEHAVIOUR WHEN SCHEDULED:
+ *        - The batch is queued with run_at = the scheduled instant. The
+ *          queue-service worker sends it at that time WITH the usual 2.5s gap
+ *          between recipients.
+ *        - The worker must be RUNNING and the machine AWAKE at the scheduled
+ *          time. If the laptop is asleep/off, the batch fires when the worker
+ *          next comes online (late, never dropped). Mention this to the user
+ *          when they schedule for a time the machine may be off.
  *
  *    TEMPLATE SELECTION:
  *    The system supports 5 email templates. Do NOT explicitly ask the user which one to use.
@@ -191,7 +239,8 @@
  *      [--productInfo "<expanded product/area phrase>"] \
  *      [--template <1|2|3|4|5>] \
  *      [--role "<role>"] \
- *      [--subject "<custom subject>"]
+ *      [--subject "<custom subject>"] \
+ *      [--scheduleAt "YYYY-MM-DDTHH:mm:ss+05:30"]   # IST; omit to send now
  *
  * 3. IMPORTANT NOTES:
  *    - The --data JSON MUST be valid JSON. Each entry needs "email" and "firstName".
@@ -208,8 +257,15 @@
  *      encoding issues (like Ã¢Â€Â" garbled text) are handled automatically.
  *    - The server must be running (default: http://localhost:3000).
  *    - The script auto-generates a JWT token by looking up the --from user in the DB.
- *    - There is a 2.5-second delay between each email to avoid rate limiting.
- *    - Timeout is 5 minutes for large batches.
+ *    - QUEUE-BASED SENDING: the API no longer blocks while sending. It enqueues
+ *      the batch and returns 202 immediately with { sessionId, queued, scheduledFor }.
+ *      The queue-service worker then sends the emails in the background, with a
+ *      2.5-second gap between each recipient in the batch (to avoid rate limiting).
+ *      => The queue-service worker MUST be running for emails to actually go out:
+ *         npm run start --workspace=@app/queue-service
+ *    - Track progress via GET /api/email/session/<sessionId>/status.
+ *    - --scheduleAt (IST, +05:30) schedules the batch instead of sending now.
+ *      See the "SCHEDULING MAILS" section at the top for the exact format.
  *
  * ─────────────────────────────
  * TEMPLATE IDS (Configure in .env or update hardcoded values):
@@ -253,6 +309,11 @@
  *   --subject      Email subject line with template vars.
  *                  Default: "Hi {{receiver_name}} - Referral Request for {{company_name}} {{ROLE}} Role"
  *   --role         Role name for {{ROLE}} variable. Default: "SDE"
+ *   --scheduleAt   Schedule the batch for a future time instead of sending now.
+ *                  Format: "YYYY-MM-DDTHH:mm:ss+05:30" (IST / Asia/Kolkata).
+ *                  The +05:30 IST offset is MANDATORY. Omit this flag to send
+ *                  immediately. See "SCHEDULING MAILS" at the top for full rules.
+ *                  e.g., "2026-06-12T09:00:00+05:30"  (9 AM IST on 12 June 2026)
  *
  * ─────────────────────────────
  * EXAMPLE INVOCATIONS:
@@ -304,6 +365,15 @@
  *     --from "iamtejasthombare@gmail.com" \
  *     --template 5 \
  *     --role "SDE"
+ *
+ *   # SCHEDULED send (template 1) for 9 AM IST tomorrow (2026-06-12):
+ *   #   The batch is queued now and sent at the scheduled IST time by the worker.
+ *   npx ts-node src/scripts/send-emails.ts \
+ *     --data '[{"email":"john@acme.com","firstName":"John"}]' \
+ *     --company "Acme Corp" \
+ *     --portalLink "https://acme.careers/job/sde-1" \
+ *     --from "iamtejasthombare@gmail.com" \
+ *     --scheduleAt "2026-06-12T09:00:00+05:30"
  *
  * ─────────────────────────────
  * ENVIRONMENT VARIABLES:
@@ -403,6 +473,7 @@ interface ParsedArgs {
   role: string;
   template: number;
   from: string;
+  scheduleAt: string | null; // ISO-8601 with IST offset, or null = send now
 }
 
 // ── HELPERS ─────────────────────────────────────────────────────────────────
@@ -418,6 +489,7 @@ function parseArgs(): ParsedArgs {
   let role = ROLE_DEFAULT;
   let template = TEMPLATE_DEFAULT;
   let from = FROM_DEFAULT;
+  let scheduleAt: string | null = null;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--data" && args[i + 1]) {
@@ -445,6 +517,8 @@ function parseArgs(): ParsedArgs {
       template = templateNum;
     } else if (args[i] === "--from" && args[i + 1]) {
       from = args[++i];
+    } else if (args[i] === "--scheduleAt" && args[i + 1]) {
+      scheduleAt = args[++i];
     }
   }
 
@@ -507,7 +581,34 @@ function parseArgs(): ParsedArgs {
     }
   }
 
-  return { data, company, portalLink, portalName, productInfo, jobId, subject, role, template, from };
+  // Validate --scheduleAt: must be a parseable date and in the future.
+  // Times are expected in IST with a +05:30 offset (see SCHEDULING MAILS above).
+  if (scheduleAt) {
+    const when = new Date(scheduleAt);
+    if (isNaN(when.getTime())) {
+      console.error(
+        `Error: --scheduleAt is not a valid date: "${scheduleAt}".\n` +
+          `Use IST format "YYYY-MM-DDTHH:mm:ss+05:30", e.g. "2026-06-12T09:00:00+05:30".`
+      );
+      process.exit(1);
+    }
+    if (!/[+-]\d{2}:?\d{2}$|Z$/.test(scheduleAt)) {
+      console.warn(
+        `Warning: --scheduleAt "${scheduleAt}" has no timezone offset. ` +
+          `It will be interpreted in the SERVER's timezone, which may differ from IST. ` +
+          `Append the IST offset "+05:30" to be unambiguous.`
+      );
+    }
+    if (when.getTime() <= Date.now()) {
+      console.error(
+        `Error: --scheduleAt "${scheduleAt}" is in the past ` +
+          `(resolves to ${when.toISOString()}). Provide a future IST time.`
+      );
+      process.exit(1);
+    }
+  }
+
+  return { data, company, portalLink, portalName, productInfo, jobId, subject, role, template, from, scheduleAt };
 }
 
 /**
@@ -535,7 +636,7 @@ async function generateAuthToken(pool: Pool, fromEmail: string): Promise<{ token
 
 // ── MAIN ────────────────────────────────────────────────────────────────────
 async function main() {
-  const { data, company, portalLink, portalName, productInfo, jobId, subject, role, template, from } = parseArgs();
+  const { data, company, portalLink, portalName, productInfo, jobId, subject, role, template, from, scheduleAt } = parseArgs();
 
   const templateId = TEMPLATE_IDS[template as keyof typeof TEMPLATE_IDS];
   const templateInfo = TEMPLATE_DESCRIPTIONS[template];
@@ -553,6 +654,13 @@ async function main() {
   if (productInfo) console.log(`Product Info    : ${productInfo}`);
   console.log(`Role            : ${role}`);
   console.log(`Subject         : ${subject}`);
+  if (scheduleAt) {
+    const when = new Date(scheduleAt);
+    console.log(`Schedule (raw)  : ${scheduleAt}`);
+    console.log(`Schedule (IST)  : ${when.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} IST`);
+  } else {
+    console.log(`Schedule        : send now (queued immediately)`);
+  }
   console.log(`Recipients      : ${data.length}`);
   data.forEach((d) => console.log(`  - ${d.firstName || "(no name)"} <${d.email}>`));
   console.log(`──────────────────────────────────\n`);
@@ -602,14 +710,25 @@ async function main() {
 
     const recipients = data.map((d) => d.email);
 
-    const payload = {
+    const payload: {
+      recipients: string[];
+      local_variables: typeof local_variables;
+      global_variables: typeof global_variables;
+      subject: string;
+      scheduledAt?: string;
+    } = {
       recipients,
       local_variables,
       global_variables,
       subject,
     };
 
-    console.log("Calling send email API...\n");
+    // Schedule the batch for a future IST time, if requested.
+    if (scheduleAt) {
+      payload.scheduledAt = new Date(scheduleAt).toISOString();
+    }
+
+    console.log(scheduleAt ? "Scheduling email batch...\n" : "Queuing email batch...\n");
 
     const response = await axios.post(
       `${SERVER_URL}/api/email/${templateId}`,

@@ -100,39 +100,41 @@ updateSessionOutreach = async (req: AuthRequest, res: Response): Promise<void> =
     try {
         const user_id = req.user?.userId!;
         const sessionId = req.params.sessionId;
-        const details = req.body?.details ?? req.body ?? {};
+        // Merge a partial actions object (namespaced, e.g. { outreach: [...] }).
+        const actions = req.body?.actions ?? req.body ?? {};
 
-        const ok = await this.logHistoryService.updateSessionOutreachDetails(sessionId, user_id, details);
+        const ok = await this.logHistoryService.updateSessionActions(sessionId, user_id, actions);
 
         if (!ok) {
             res.status(404).json({ message: "Session not found or not updated", error: "Update failed", success: false });
             return;
         }
 
-        res.status(200).json({ message: "Outreach details saved successfully", success: true });
+        res.status(200).json({ message: "Session actions saved successfully", success: true });
     } catch (error) {
-        logger.error("Error updating session outreach details", { error });
-        res.status(500).json({ message: "Internal Server Error", error: "Failed to save outreach details", success: false });
+        logger.error("Error updating session actions", { error });
+        res.status(500).json({ message: "Internal Server Error", error: "Failed to save session actions", success: false });
     }
 }
 
-setSessionInterviewers = async (req: AuthRequest, res: Response): Promise<void> => {
+setSessionOutreach = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const user_id = req.user?.userId!;
         const sessionId = req.params.sessionId;
-        const interviewers = Array.isArray(req.body?.interviewers) ? req.body.interviewers : [];
+        // New body shape: { outreach: [...] }. Replaces actions.outreach wholesale.
+        const outreach = Array.isArray(req.body?.outreach) ? req.body.outreach : [];
 
-        const ok = await this.logHistoryService.setSessionInterviewers(sessionId, user_id, interviewers);
+        const ok = await this.logHistoryService.setSessionOutreach(sessionId, user_id, outreach);
 
         if (!ok) {
             res.status(404).json({ message: "Session not found or not updated", error: "Update failed", success: false });
             return;
         }
 
-        res.status(200).json({ message: "Interview details saved successfully", success: true });
+        res.status(200).json({ message: "Outreach saved successfully", success: true });
     } catch (error) {
-        logger.error("Error setting session interviewers", { error });
-        res.status(500).json({ message: "Internal Server Error", error: "Failed to save interviewers", success: false });
+        logger.error("Error setting session outreach", { error });
+        res.status(500).json({ message: "Internal Server Error", error: "Failed to save outreach", success: false });
     }
 }
 
@@ -140,24 +142,25 @@ updateLogActions = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const user_id = req.user?.userId!;
         const logId = parseInt(req.params.logId, 10);
-        const actions = req.body?.actions ?? req.body ?? {};
+        // New body shape: { mail_replied: [...] }. Replaces user_actions.mail_replied.
+        const mailReplied = Array.isArray(req.body?.mail_replied) ? req.body.mail_replied : [];
 
         if (Number.isNaN(logId)) {
             res.status(400).json({ message: "Invalid log id", error: "Invalid log id", success: false });
             return;
         }
 
-        const ok = await this.logHistoryService.updateLogUserActions(logId, user_id, actions);
+        const ok = await this.logHistoryService.setLogReplies(logId, user_id, mailReplied);
 
         if (!ok) {
             res.status(404).json({ message: "Log not found or not updated", error: "Update failed", success: false });
             return;
         }
 
-        res.status(200).json({ message: "Recipient action saved successfully", success: true });
+        res.status(200).json({ message: "Recipient replies saved successfully", success: true });
     } catch (error) {
-        logger.error("Error updating log user actions", { error });
-        res.status(500).json({ message: "Internal Server Error", error: "Failed to save action", success: false });
+        logger.error("Error updating log replies", { error });
+        res.status(500).json({ message: "Internal Server Error", error: "Failed to save replies", success: false });
     }
 }
 

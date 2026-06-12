@@ -66,10 +66,29 @@ export default {
           from: { height: "var(--radix-accordion-content-height)" },
           to: { height: "0" },
         },
+        // Moving gradient sweep — used on the Local Variables card while the
+        // AI agent is generating recipient first names.
+        "ai-shimmer": {
+          "0%": { backgroundPosition: "200% 0" },
+          "100%": { backgroundPosition: "-200% 0" },
+        },
+        // Soft pulsing glow ring for the "generating with AI" state.
+        "ai-glow": {
+          "0%, 100%": { boxShadow: "0 0 0 0 rgba(139, 92, 246, 0.35)" },
+          "50%": { boxShadow: "0 0 0 6px rgba(139, 92, 246, 0)" },
+        },
+        // Reveal animation for each generated value chip.
+        "ai-reveal": {
+          from: { opacity: "0", transform: "translateY(4px)" },
+          to: { opacity: "1", transform: "translateY(0)" },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
+        "ai-shimmer": "ai-shimmer 2.5s linear infinite",
+        "ai-glow": "ai-glow 1.8s ease-in-out infinite",
+        "ai-reveal": "ai-reveal 0.35s ease-out both",
       },
     },
   },

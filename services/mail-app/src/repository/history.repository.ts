@@ -343,7 +343,7 @@ export class HistoryRepository {
       completed_at: Date | null;
       created_at: Date;
       duration_seconds: number | null;
-      outreach_details: Record<string, any>;
+      actions: Record<string, any>;
       recipient_companies: string[];
     }>;
     total: number;
@@ -441,7 +441,7 @@ export class HistoryRepository {
              THEN EXTRACT(EPOCH FROM (es.completed_at - es.started_at))::int
              ELSE NULL
            END AS duration_seconds,
-           COALESCE(es.outreach_details, '{}'::jsonb) AS outreach_details,
+           COALESCE(es.actions, '{}'::jsonb) AS actions,
            sc.companies AS recipient_companies
          FROM email_sessions es
          LEFT JOIN templates t ON es.template_id = t.id
@@ -502,7 +502,7 @@ export class HistoryRepository {
     status: string;
     started_at: Date;
     global_variables: any;
-    outreach_details: any;
+    actions: any;
     recipient_companies: string[];
     recipients: Array<{
       id: number;
@@ -519,7 +519,7 @@ export class HistoryRepository {
          es.status,
          es.started_at,
          es.global_variables,
-         es.outreach_details,
+         COALESCE(es.actions, '{}'::jsonb) AS actions,
          COALESCE(
            ARRAY(
              SELECT DISTINCT ser.company_name
@@ -554,62 +554,63 @@ export class HistoryRepository {
   }
 
   /**
-   * Merge interview / reach-out details into a session's outreach_details JSON.
-   * Stored at the session level (e.g. interview_scheduled flag + person info).
+   * Merge a partial actions object into a session's `actions` JSON (namespaced
+   * by action type, e.g. { outreach: [...] }). Top-level keys are replaced.
    */
-  async updateSessionOutreachDetails(
+  async updateSessionActions(
     sessionId: string,
-    user_id: string,
-    details: Record<string, any>
-  ): Promise<boolean> {
-    const res = await this.pool.query(
-      `UPDATE email_sessions
-          SET outreach_details = COALESCE(outreach_details, '{}'::jsonb) || $1::jsonb
-        WHERE id = $2 AND user_id = $3`,
-      [JSON.stringify(details), sessionId, user_id]
-    );
-    return (res.rowCount ?? 0) > 0;
-  }
-
-  /**
-   * Replace the full interviewers array in a session's outreach_details.
-   * The UI manages add/update/delete client-side and sends the whole list.
-   * `interview_scheduled` is kept in sync (true when the list is non-empty).
-   */
-  async setSessionInterviewers(
-    sessionId: string,
-    user_id: string,
-    interviewers: any[]
-  ): Promise<boolean> {
-    const details = {
-      interviewers,
-      interview_scheduled: Array.isArray(interviewers) && interviewers.length > 0,
-    };
-    const res = await this.pool.query(
-      `UPDATE email_sessions
-          SET outreach_details = COALESCE(outreach_details, '{}'::jsonb) || $1::jsonb
-        WHERE id = $2 AND user_id = $3`,
-      [JSON.stringify(details), sessionId, user_id]
-    );
-    return (res.rowCount ?? 0) > 0;
-  }
-
-  /**
-   * Merge user-level action flags (e.g. { responded: true, message: "..." })
-   * into a specific recipient's email_logs.user_actions JSON.
-   * Scoped by user_id for safety.
-   */
-  async updateLogUserActions(
-    logId: number,
     user_id: string,
     actions: Record<string, any>
   ): Promise<boolean> {
     const res = await this.pool.query(
+      `UPDATE email_sessions
+          SET actions = COALESCE(actions, '{}'::jsonb) || $1::jsonb
+        WHERE id = $2 AND user_id = $3`,
+      [JSON.stringify(actions), sessionId, user_id]
+    );
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * Replace the full outreach list under actions.outreach. The UI manages
+   * add/update/delete client-side and sends the whole list. "interview
+   * scheduled" is DERIVED from the list length (no stored flag).
+   */
+  async setSessionOutreach(
+    sessionId: string,
+    user_id: string,
+    outreach: any[]
+  ): Promise<boolean> {
+    const res = await this.pool.query(
+      `UPDATE email_sessions
+          SET actions = jsonb_set(
+                COALESCE(actions, '{}'::jsonb), '{outreach}', $1::jsonb
+              )
+        WHERE id = $2 AND user_id = $3`,
+      [JSON.stringify(Array.isArray(outreach) ? outreach : []), sessionId, user_id]
+    );
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * Replace the full mail_replied list under a recipient's user_actions. The UI
+   * manages add/edit/delete client-side and sends the whole array (mixing
+   * source:'manual' entries it owns with any source:'auto' ones it read back).
+   * Scoped by user_id for safety.
+   */
+  async setLogReplies(
+    logId: number,
+    user_id: string,
+    mailReplied: any[]
+  ): Promise<boolean> {
+    const res = await this.pool.query(
       `UPDATE email_logs
-          SET user_actions = COALESCE(user_actions, '{}'::jsonb) || $1::jsonb,
+          SET user_actions = jsonb_set(
+                COALESCE(user_actions, '{}'::jsonb), '{mail_replied}', $1::jsonb
+              ),
               last_updated = NOW()
         WHERE id = $2 AND user_id = $3`,
-      [JSON.stringify(actions), logId, user_id]
+      [JSON.stringify(Array.isArray(mailReplied) ? mailReplied : []), logId, user_id]
     );
     return (res.rowCount ?? 0) > 0;
   }

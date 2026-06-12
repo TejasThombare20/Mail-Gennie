@@ -4,3 +4,6 @@ dist
 serviceAccount.json
 logs
 public
+pubsub-key.json
+*.json.key
+serviceAccount*.json

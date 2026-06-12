@@ -105,12 +105,12 @@ import {
   sanitizeNonAscii,
 } from "../utils/validate-email";
 import { AttachmentRepository } from "../repository/attachment.repository";
+import { SentEmailRecordsRepository } from "../repository/sentEmailRecords.repository";
 import { Attachment, EmailAttachment } from "../types/attachment.types";
 import { AttachmentService } from "./attachment.service";
 import fs from 'fs';
 import path from 'path';
 import logger from '../utils/logger';
-import pool from '../config/database';
 
 // Helper function to add delay between emails
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -168,7 +168,8 @@ export class EmailService {
     private templateRepository: TemplateRepository,
     private historyRepository: HistoryRepository,
     private attahcmentRepository: AttachmentRepository,
-    private attachmentService: AttachmentService
+    private attachmentService: AttachmentService,
+    private sentEmailRecordsRepository: SentEmailRecordsRepository
   ) {
     this.oauth2Client = new OAuth2Client({
       clientId: process.env.GOOGLE_CLIENT_ID,
@@ -226,6 +227,76 @@ export class EmailService {
     } catch (error) {
       throw new Error("Failed to initialize Gmail client");
     }
+  }
+
+  /**
+   * Prepare a batch for the queue: fetch the template and resolve attachment
+   * bytes ONCE (the heavy Firebase work), so the queue worker never touches
+   * storage. Returns the template HTML and the resolved attachments to embed.
+   *
+   * This is the enqueue-side counterpart to sendEmail(): it does the shared,
+   * once-per-batch work, then the EmailEnqueueService creates the session/logs
+   * and enqueues one job per recipient.
+   */
+  async prepareBatch(
+    userId: string,
+    templateId: string
+  ): Promise<{ html: string; attachments: EmailAttachment[] }> {
+    const template = await this.templateRepository.getTemplateById(templateId, userId);
+    if (!template) {
+      throw new Error("Template not found");
+    }
+
+    const resolved = await this.resolveAttachments(template, userId);
+    return { html: template.html_content, attachments: resolved };
+  }
+
+  /**
+   * Resolve a template's attachments (and the optional default PDF) into base64
+   * EmailAttachment objects. Extracted from sendEmail so both the legacy direct
+   * send and the new enqueue path share one implementation.
+   */
+  private async resolveAttachments(
+    template: { attachments?: string[] },
+    userId: string
+  ): Promise<EmailAttachment[]> {
+    const resolved: EmailAttachment[] = [];
+
+    if (template.attachments && template.attachments.length > 0) {
+      const attachmentsData = await this.attahcmentRepository.findByIds(template.attachments);
+      if (!attachmentsData || attachmentsData.length !== template.attachments.length) {
+        logger.error("One or more attachment IDs are invalid", { });
+        throw new Error("One or more attachment IDs are invalid");
+      }
+      const buffered = await Promise.all(
+        attachmentsData.map((a) => this.attachmentService.getAttachmentBase64(a, userId))
+      );
+      for (const b of buffered) if (b) resolved.push(b);
+    }
+
+    if (resolved.length === 0 && process.env.DEFAULT_ATTACHMENT_ENABLED === "true") {
+      try {
+        const attachmentDir = process.env.DEFAULT_ATTACHMENT_DIR;
+        const attachmentFileName = process.env.DEFAULT_ATTACHMENT_FILE_NAME!;
+        if (!attachmentFileName) {
+          throw new Error("DEFAULT_ATTACHMENT_FILE_NAME env variable is not set");
+        }
+        const pdfPath = path.join(process.cwd(), attachmentDir!, attachmentFileName);
+        const pdfContent = fs.readFileSync(pdfPath);
+        resolved.push({
+          filename: attachmentFileName,
+          content: pdfContent.toString("base64"),
+          mimeType: "application/pdf",
+          expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          file_url: `file://${pdfPath}`,
+        });
+        logger.info("Default attachment added", { pdfPath });
+      } catch (error) {
+        logger.error("Failed to load default attachment", { error });
+      }
+    }
+
+    return resolved;
   }
 
   async sendEmail(
@@ -437,14 +508,10 @@ export class EmailService {
             // is_valid starts as 'not_verified'; the bounce-scan cron flips it to
             // 'valid' / 'failed' once it inspects the Gmail thread. On re-send we
             // reset it so the address gets re-verified.
-            await pool.query(
-              `INSERT INTO sent_email_records (first_name, email, company_name, sent_at, type, is_valid)
-               VALUES ($1, $2, $3, NOW(), 'sent', 'not_verified')
-               ON CONFLICT (email) DO UPDATE
-                 SET type     = 'sent',
-                     sent_at  = EXCLUDED.sent_at,
-                     is_valid = 'not_verified'`,
-              [firstName, recipient, companyName]
+            await this.sentEmailRecordsRepository.upsertSent(
+              firstName,
+              recipient,
+              companyName
             );
           } catch (recordErr) {
             logger.error("Failed to insert sent_email_record", { recipient, error: recordErr });

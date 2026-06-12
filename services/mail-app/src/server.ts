@@ -34,6 +34,10 @@ import { BounceScanService } from './services/bounceScan.service';
 import { BounceScanController } from './controllers/bounceScan.controller';
 import { createBounceScanRouter } from './routes/bounceScan.routes';
 import { startBounceScanCron } from './cron/bounceScan.cron';
+import { EmailEnqueueService } from './services/emailEnqueue.service';
+import { AgentEnrichmentService } from './services/agentEnrichment.service';
+import { runMigrations as runGraphileMigrations } from 'graphile-worker';
+import { env, WatchManager, SessionRepository, EmailLogRepository, GraphileJobQueue } from '@app/shared';
 
 dotenv.config();
 
@@ -56,6 +60,13 @@ app.use(morgan(':method :url :status :res[content-length] - :response-time ms', 
 
 connectDB();
 
+// Ensure the graphile_worker schema (incl. the add_job function) exists so the
+// transactional enqueue in EmailEnqueueService works even before the
+// queue-service has booted. Safe + idempotent to run on every startup.
+runGraphileMigrations({ connectionString: env.databaseUrl })
+  .then(() => logger.info('graphile-worker schema ready'))
+  .catch((err) => logger.error('graphile-worker migration failed', { error: err?.message }));
+
 const firebaseStorage = new MediaStorage();
 
  const userRepository = new UserRepository(pool);
@@ -65,11 +76,18 @@ const firebaseStorage = new MediaStorage();
  const attachmentsRepository = new AttachmentRepository(pool)
  const logHistoryRepository = new HistoryRepository(pool)
  const sentEmailRecordsRepository = new SentEmailRecordsRepository(pool)
+ const sessionRepository = new SessionRepository(pool)
+ const emailLogRepository = new EmailLogRepository(pool)
+ const jobQueue = new GraphileJobQueue(pool)
 
-const authService = new AuthService(userRepository, tokenRepository);
+// Auto-arms Gmail watches at login when GMAIL_PUBSUB_TOPIC is set (no-op otherwise).
+const watchManager = new WatchManager();
+const authService = new AuthService(userRepository, tokenRepository, watchManager);
 const templateService = new TemplateService(templateRepository,attachmentsRepository);
 const attachmentService = new AttachmentService(attachmentsRepository ,firebaseStorage);
-const emailService = new EmailService(tokenRepository, templateRepository,historyRepository,attachmentsRepository,attachmentService );
+const emailService = new EmailService(tokenRepository, templateRepository,historyRepository,attachmentsRepository,attachmentService,sentEmailRecordsRepository );
+const emailEnqueueService = new EmailEnqueueService(emailService, sessionRepository, emailLogRepository, jobQueue)
+const agentEnrichmentService = new AgentEnrichmentService()
 const logHistoryService = new LogHistoryService(logHistoryRepository)
 const sentEmailRecordsService = new SentEmailRecordsService(sentEmailRecordsRepository)
 const bounceScanService = new BounceScanService(tokenRepository, historyRepository)
@@ -78,7 +96,7 @@ const bounceScanService = new BounceScanService(tokenRepository, historyReposito
 const authController = new AuthController(authService, userRepository);
 const templateController = new TemplateController(templateService, emailService, attachmentService);
 const attachmentController = new AttachmentController(attachmentService);
-const emailController = new EmailController(emailService)
+const emailController = new EmailController(emailEnqueueService, agentEnrichmentService, sessionRepository)
 const logHistoryController = new LogHistoryController(logHistoryService)
 const sentEmailRecordsController = new SentEmailRecordsController(sentEmailRecordsService)
 const bounceScanController = new BounceScanController(bounceScanService)
@@ -86,7 +104,7 @@ const bounceScanController = new BounceScanController(bounceScanService)
 
 
 app.get('/', (req: Request, res: Response) => {
-  res.send('Welcome to Express Server');
+  res.send('mail-app server is running!');
 });
 
 

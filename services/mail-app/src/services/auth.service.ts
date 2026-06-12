@@ -14,13 +14,17 @@ import { IUser } from "../types/users.types";
 // import { DecodedIdToken } from "firebase-admin/auth";
 import { TokenRepository } from "../repository/token.repository";
 import { IGoogleUserInfo } from "../types/auth.types";
+import { WatchManager } from "@app/shared";
 
 export class AuthService {
   private oauth2Client: OAuth2Client;
 
   constructor(
     private userRepository: UserRepository,
-    private tokenRepository: TokenRepository
+    private tokenRepository: TokenRepository,
+    // Optional: when a Pub/Sub topic is configured, sign-in auto-arms the user's
+    // Gmail watch so inbox events (replies/bounces) are captured in real time.
+    private watchManager?: WatchManager
   ) {
     this.oauth2Client = new OAuth2Client({
       clientId: process.env.GOOGLE_CLIENT_ID,
@@ -82,10 +86,28 @@ export class AuthService {
       tokens.refresh_token ?? undefined
     );
 
-    // Generate JWT for API authentication  
+    // Generate JWT for API authentication
     const jwtToken = this.generateJWT(user);
 
     logger.info("JWT token generated for user", { userId: user.id });
+
+    // Auto-arm (or refresh) the Gmail watch for this user so inbox events are
+    // captured in real time. Fire-and-forget: never block or fail the login.
+    // ensureFresh only re-arms when the watch is missing or near expiry (~7d),
+    // so this is cheap on every sign-in. No-op when no Pub/Sub topic is set.
+    if (this.watchManager?.isConfigured()) {
+      this.watchManager
+        .ensureFresh(user.id)
+        .then((armed) => {
+          if (armed) logger.info("[auth] gmail watch armed at login", { userId: user.id });
+        })
+        .catch((err) =>
+          logger.error("[auth] failed to arm gmail watch at login", {
+            userId: user.id,
+            error: (err as Error).message,
+          })
+        );
+    }
 
     return { user, token: jwtToken };
   }

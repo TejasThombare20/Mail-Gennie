@@ -1,0 +1,28 @@
+{
+  "name": "@app/queue-service",
+  "version": "1.0.0",
+  "description": "Queue worker: drains scheduled/batch send jobs via graphile-worker with per-session pacing",
+  "license": "ISC",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "dev": "nodemon --watch src --ext ts --exec \"ts-node src/index.ts\""
+  },
+  "dependencies": {
+    "@app/shared": "*",
+    "dotenv": "^16.4.7",
+    "graphile-worker": "^0.16.6",
+    "googleapis": "^144.0.0",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/pg": "^8.11.11",
+    "nodemon": "^3.1.9",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3"
+  }
+}

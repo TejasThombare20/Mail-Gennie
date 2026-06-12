@@ -6,7 +6,11 @@ import { authMiddleware } from "../middleware/auth.middleware";
 export const createEmailRouter = (emailController: EmailController): Router => {
   const router = Router();
 
-  router.post('/:id',authMiddleware ,emailController.sendEmail);
-  
+  // Enqueue a batch (returns 202). Optional body.scheduledAt for scheduling.
+  router.post('/:id', authMiddleware, emailController.sendEmail);
+
+  // Poll a batch's progress.
+  router.get('/session/:sessionId/status', authMiddleware, emailController.getSessionStatus);
+
   return router;
 };

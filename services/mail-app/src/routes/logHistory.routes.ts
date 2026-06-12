@@ -14,7 +14,9 @@ export const createLogHistoryRouter = (logHistoryController: LogHistoryControlle
   // Outreach / user-action endpoints (must come before the catch-all below)
   router.get('/session/:sessionId/outreach', authMiddleware, logHistoryController.getSessionForOutreach);
   router.patch('/session/:sessionId/outreach', authMiddleware, logHistoryController.updateSessionOutreach);
-  router.put('/session/:sessionId/interviewers', authMiddleware, logHistoryController.setSessionInterviewers);
+  // Replace the full actions.outreach list. Body: { outreach: [...] }.
+  router.put('/session/:sessionId/outreach-list', authMiddleware, logHistoryController.setSessionOutreach);
+  // Replace the full user_actions.mail_replied list. Body: { mail_replied: [...] }.
   router.patch('/log/:logId/actions', authMiddleware, logHistoryController.updateLogActions);
 
   router.get('/:last_sent_at?',authMiddleware, logHistoryController.getUserEmailLogs);
