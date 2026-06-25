@@ -9,8 +9,8 @@ export class TemplateRepository {
     async createTemplate(template: Omit<ITemplate, 'id' | 'created_at' | 'updated_at'>): Promise<ITemplate | null> {
       try {
       const query = `
-        INSERT INTO templates (user_id, name, json_data, html_content, attachments, category, id, local_variables, global_variables )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        INSERT INTO templates (user_id, name, json_data, html_content, attachments, category, id, local_variables, global_variables, subject, template_number )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING *
       `;
       const values = [
@@ -21,8 +21,10 @@ export class TemplateRepository {
         template?.attachments,
         template?.category,
         uuidv4(),
-        JSON.stringify(template?.local_variables || []),  
-        JSON.stringify(template?.global_variables || []) 
+        JSON.stringify(template?.local_variables || []),
+        JSON.stringify(template?.global_variables || []),
+        template?.subject ?? null,
+        template?.template_number ?? null
       ];
       const result = await this.pool.query(query, values);
       return result.rows[0];
@@ -37,16 +39,18 @@ export class TemplateRepository {
     try {
 
         const query = `
-          UPDATE templates 
-          SET 
+          UPDATE templates
+          SET
             name = COALESCE($1, name),
             json_data = COALESCE($2, json_data),
             html_content = COALESCE($3, html_content),
             attachments = COALESCE($4, attachments),
             category = COALESCE($5, category),
             local_variables = COALESCE($6, local_variables),
-            global_variables = COALESCE($7, global_variables)
-          WHERE id = $8 AND user_id = $9
+            global_variables = COALESCE($7, global_variables),
+            subject = COALESCE($8, subject),
+            template_number = COALESCE($9, template_number)
+          WHERE id = $10 AND user_id = $11
           RETURNING *;
       `;
       const values = [
@@ -57,6 +61,8 @@ export class TemplateRepository {
         template?.category,
         template?.local_variables ? JSON.stringify(template.local_variables) : null,
         template?.global_variables ? JSON.stringify(template.global_variables) : null,
+        template?.subject ?? null,
+        template?.template_number ?? null,
         templateId,
         user_id
       ];

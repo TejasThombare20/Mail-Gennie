@@ -34,6 +34,10 @@ export interface ITemplate {
   updated_at: Date;
   local_variables: Variable[];
   global_variables: Variable[];
+  /** Default subject line for this template (may contain {{placeholders}}). */
+  subject?: string | null;
+  /** Stable per-user number used for tag-based routing (e.g. "template 4"). */
+  template_number?: number | null;
 }
 
 export interface EmailStatus {

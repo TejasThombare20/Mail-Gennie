@@ -21,6 +21,10 @@ export interface ITemplate {
   updated_at: Date;
   local_variables :variable[];
   global_variables : variable[];
+  /** Default subject line for this template (may contain {{placeholders}}). */
+  subject?: string | null;
+  /** Stable per-user number used for tag-based routing (e.g. "template 4"). */
+  template_number?: number | null;
   attachmentsdata?: Attachment[];
 }
 

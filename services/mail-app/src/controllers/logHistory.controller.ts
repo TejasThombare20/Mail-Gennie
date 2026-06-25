@@ -77,6 +77,96 @@ getEmailsByCompanyDate = async (req: AuthRequest, res: Response): Promise<void> 
     }
 }
 
+/**
+ * Server-Sent Events stream of the user's active (queued / in_progress)
+ * sessions. The dashboard opens this with an EventSource so it can live-update
+ * the Session Details section without polling the heavy paginated endpoint.
+ *
+ * Each "status" event carries the array of active session rows. When no session
+ * is active anymore we emit one final "idle" event and close, so the client can
+ * do a single refetch to pick up the now-completed rows and then stop.
+ */
+streamSessionStatus = async (req: AuthRequest, res: Response): Promise<void> => {
+    const user_id = req.user?.userId!;
+
+    res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no", // disable proxy buffering (nginx)
+    });
+    res.flushHeaders?.();
+
+    let closed = false;
+    let lastPayload = "";
+
+    const send = (event: string, data: unknown) => {
+        if (closed) return;
+        res.write(`event: ${event}\n`);
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    const tick = async () => {
+        if (closed) return;
+        try {
+            const active = await this.logHistoryService.getActiveSessionStatuses(user_id);
+            const payload = JSON.stringify(active);
+
+            // Only push when something changed to avoid needless client work.
+            if (payload !== lastPayload) {
+                lastPayload = payload;
+                send("status", active);
+            }
+
+            if (active.length === 0) {
+                // Nothing left moving — tell the client to do a final refetch, then stop.
+                send("idle", { done: true });
+                cleanup();
+            }
+        } catch (error) {
+            logger.error("Error in session-status SSE tick", { error });
+        }
+    };
+
+    const interval = setInterval(tick, 3000);
+    // Heartbeat comment keeps the connection alive through idle proxies.
+    const heartbeat = setInterval(() => {
+        if (!closed) res.write(`: ping\n\n`);
+    }, 25000);
+
+    const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(interval);
+        clearInterval(heartbeat);
+        res.end();
+    };
+
+    req.on("close", cleanup);
+
+    // Send the current snapshot immediately so the UI doesn't wait 3s.
+    await tick();
+}
+
+getSessionDetails = async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+        const user_id = req.user?.userId!;
+        const sessionId = req.params.sessionId;
+
+        const session = await this.logHistoryService.getSessionDetails(sessionId, user_id);
+
+        if (!session) {
+            res.status(404).json({ message: "Session not found", error: "Session not found", success: false });
+            return;
+        }
+
+        res.status(200).json({ data: session, message: "Session details fetched successfully", success: true });
+    } catch (error) {
+        logger.error("Error fetching session details", { error });
+        res.status(500).json({ message: "Internal Server Error", error: "Failed to fetch session details", success: false });
+    }
+}
+
 getSessionForOutreach = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
         const user_id = req.user?.userId!;
@@ -170,10 +260,11 @@ getUserEmailLogs = async (req : AuthRequest , res : Response)  : Promise<void> =
         const user_id = req.user?.userId!
 
         const last_sent_at  = req.params.last_sent_at || null
+        const search = (req.query.search as string)?.trim() || null
 
-        logger.info("Fetching email logs", { user_id, last_sent_at })
-        
-        const userHistoryLogData = await this.logHistoryService.getEmailLogs(user_id ,last_sent_at)
+        logger.info("Fetching email logs", { user_id, last_sent_at, search })
+
+        const userHistoryLogData = await this.logHistoryService.getEmailLogs(user_id ,last_sent_at, search)
 
         if(!userHistoryLogData){
             res.status(404).json({ message : "not able to fetch the user's data ", error : "falied to fetch log history", success : false })

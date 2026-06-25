@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "./ui-component/Button";
 import { Input } from "./ui-component/Input";
@@ -49,6 +49,10 @@ const Historytable = () => {
   const [isErrror, SetIsError] = useState(false);
   const [selectedEmail, setSelectedEmail] =
     useState<getEmailLogsApiResponse | null>(null);
+  // Sessions whose recipient details are currently being lazy-fetched.
+  const [detailsLoading, setDetailsLoading] = useState<Record<string, boolean>>(
+    {}
+  );
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
@@ -56,42 +60,74 @@ const Historytable = () => {
   const [searchQuery, setSearchQuery] = useState("");
   const navigate = useNavigate();
 
+  // Lazy-load a session's full details (recipients + variables) on demand and
+  // merge them into the row. The list payload omits these heavy fields, so we
+  // only fetch them when a row is expanded or "View details" is opened. Cached:
+  // a session that already has email_logs is never refetched.
+  const fetchSessionDetails = async (
+    sessionId: string
+  ): Promise<getEmailLogsApiResponse | null> => {
+    const existing = emailHistory.find((s) => s.id === sessionId);
+    if (existing?.email_logs) return existing; // already loaded
+    try {
+      setDetailsLoading((m) => ({ ...m, [sessionId]: true }));
+      const res = await apiHandler.get<getEmailLogsApiResponse>(
+        `/api/loghistory/session/${sessionId}/details`
+      );
+      const detailed = res?.data ?? null;
+      if (detailed) {
+        setEmailHistory((prev) =>
+          prev.map((s) =>
+            s.id === sessionId
+              ? {
+                  ...s,
+                  email_logs: detailed.email_logs ?? [],
+                  global_variables: detailed.global_variables ?? [],
+                }
+              : s
+          )
+        );
+      }
+      return detailed;
+    } catch (error) {
+      console.error("Error fetching session details:", error);
+      return null;
+    } finally {
+      setDetailsLoading((m) => ({ ...m, [sessionId]: false }));
+    }
+  };
+
+  // Open the "Email Campaign Details" modal, lazy-loading recipients first.
+  const handleViewDetails = async (row: getEmailLogsApiResponse) => {
+    if (row.email_logs) {
+      setSelectedEmail(row);
+      return;
+    }
+    setSelectedEmail(row); // show modal immediately with a loading state
+    const detailed = await fetchSessionDetails(row.id);
+    if (detailed) {
+      setSelectedEmail({
+        ...row,
+        email_logs: detailed.email_logs ?? [],
+        global_variables: detailed.global_variables ?? [],
+      });
+    }
+  };
+
   const columns = getColumns({
-    setSelectedEmail,
+    setSelectedEmail: (updater) => {
+      // Route "View details" through the lazy-loader.
+      const value =
+        typeof updater === "function" ? updater(selectedEmail) : updater;
+      if (value) handleViewDetails(value);
+      else setSelectedEmail(null);
+    },
     onResponded: (sessionId: string) =>
       navigate(`/dashboard/outreach/${sessionId}?mode=responded`),
   });
 
-  // Client-side search across subject, template, recipient email/name,
-  // and global + local variable keys/values.
-  const filteredHistory = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return emailHistory;
-
-    const varMatches = (
-      vars?: Array<{ key?: string; value?: string }>
-    ): boolean =>
-      (vars || []).some(
-        (v) =>
-          v?.key?.toLowerCase().includes(q) ||
-          v?.value?.toLowerCase().includes(q)
-      );
-
-    return emailHistory.filter((session) => {
-      if (session.subject?.toLowerCase().includes(q)) return true;
-      if (session.template_name?.toLowerCase().includes(q)) return true;
-      if (varMatches(session.global_variables)) return true;
-
-      return (session.email_logs || []).some(
-        (log) =>
-          log.recipient_email?.toLowerCase().includes(q) ||
-          varMatches(log.local_variables)
-      );
-    });
-  }, [emailHistory, searchQuery]);
-
   const table = useReactTable({
-    data: filteredHistory,
+    data: emailHistory,
     columns,
     state: {
       expanded,
@@ -100,33 +136,70 @@ const Historytable = () => {
       columnVisibility,
       rowSelection,
     },
-    onExpandedChange: setExpanded,  
+    onExpandedChange: setExpanded,
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
     getCoreRowModel: getCoreRowModel(),
-    // getPaginationRowModel: getPaginationRowModel(),
-    // getSortedRowModel: getSortedRowModel(),
-    // getFilteredRowModel: getFilteredRowModel(),
+    getPaginationRowModel: getPaginationRowModel(),
+    getSortedRowModel: getSortedRowModel(),
+    getFilteredRowModel: getFilteredRowModel(),
+    // Stable row id = session id, so `expanded` keys are session ids (not array
+    // indices). Makes lazy-fetch-on-expand and detail merges robust to sorting.
+    getRowId: (row) => row.id,
+    // Recipients are lazy-loaded, so subRows are empty until then; allow
+    // expansion based on recipient_count instead.
+    getRowCanExpand: (row) => (row.original.recipient_count ?? 0) > 0,
     //@ts-ignore
     getSubRows: (row) => row.email_logs,
     onColumnVisibilityChange: setColumnVisibility,
     onRowSelectionChange: setRowSelection,
   });
 
+  // When a row becomes expanded, lazy-fetch its recipients (cached). With
+  // getRowId set, `expanded` keys are session ids.
   useEffect(() => {
-    fetchEmailHistory();
-  }, []);
+    const wantDetails = (id: string) => {
+      const s = emailHistory.find((x) => x.id === id);
+      if (s && (s.recipient_count ?? 0) > 0 && !s.email_logs) {
+        fetchSessionDetails(id);
+      }
+    };
+    if (expanded === true) {
+      // search auto-expands everything; load details for all visible rows.
+      emailHistory.forEach((s) => wantDetails(s.id));
+    } else if (expanded && typeof expanded === "object") {
+      Object.entries(expanded).forEach(([id, open]) => open && wantDetails(id));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded]);
 
-  const fetchEmailHistory = async () => {
+  // Server-side search: debounce the query and (re)fetch. The server matches
+  // recipient email, name (local vars), company name / portal link / post link
+  // (global vars), subject and template name across ALL sessions — not just the
+  // latest 10 — so older recipients are found too.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      fetchEmailHistory(searchQuery.trim());
+    }, 350);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  const fetchEmailHistory = async (search = "") => {
     try {
       setIsLoading(true);
-      const response = await apiHandler.get<getEmailLogsApiResponse[]>(
-        "/api/loghistory/"
-      );
-      setEmailHistory(response?.data!);
+      SetIsError(false);
+      const url = search
+        ? `/api/loghistory/?search=${encodeURIComponent(search)}`
+        : "/api/loghistory/";
+      const response = await apiHandler.get<getEmailLogsApiResponse[]>(url);
+      setEmailHistory(response?.data ?? []);
+      // Auto-expand all sessions while searching so a matching recipient (in a
+      // sub-row) is visible; collapse again when the search is cleared.
+      setExpanded(search ? true : {});
       setIsLoading(false);
     } catch (error) {
       SetIsError(true);
+      setIsLoading(false);
       console.error("Error fetching email history:", error);
     }
   };
@@ -139,7 +212,7 @@ const Historytable = () => {
           <div className="relative w-72">
             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input
-              placeholder="Search email, name, subject, variables..."
+              placeholder="Search email, name, company, portal/post link..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-8"
@@ -148,7 +221,7 @@ const Historytable = () => {
           <Button
             variant="outline"
             size="sm"
-            onClick={fetchEmailHistory}
+            onClick={() => fetchEmailHistory(searchQuery.trim())}
             className="flex items-center gap-1"
           >
             <RefreshCw className="h-4 w-4" />
@@ -165,7 +238,7 @@ const Historytable = () => {
             <ErrorState message="Something went wrong. Please retry or contact administrator" />
           ) : isLoading ? (
             <LoadingState />
-          ) : !isLoading && emailHistory?.length === 0   ? (
+          ) : !isLoading && emailHistory?.length === 0 && !searchQuery ? (
             <EmptyState
               title="Email history is Empty"
               description="You haven't send any mail yet"
@@ -216,7 +289,14 @@ const Historytable = () => {
                           </TableRow>
                           {row.getIsExpanded() && (
                             <>
-                              <ExpandedHistoryrow columns={columns} row={row} />
+                              <ExpandedHistoryrow
+                                columns={columns}
+                                row={row}
+                                loading={
+                                  !!detailsLoading[row.original.id] &&
+                                  !row.original.email_logs
+                                }
+                              />
                             </>
                           )}
                         </React.Fragment>
@@ -250,7 +330,8 @@ const Historytable = () => {
         onClose={(open) => !open && setSelectedEmail(null)}
       >
         <>
-          {selectedEmail ? (
+          {selectedEmail && selectedEmail.email_logs ? (
+            // Recipients + variables are lazy-loaded; render only once present.
             <HistoryRowDetails selectedRow={selectedEmail} />
           ) : (
             <LoadingState />

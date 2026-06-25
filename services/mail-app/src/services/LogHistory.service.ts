@@ -37,11 +37,29 @@ export class LogHistoryService {
     }
   }
 
+  async getActiveSessionStatuses(user_id: string) {
+    try {
+      return await this.historyRepository.getActiveSessionStatuses(user_id);
+    } catch (error) {
+      logger.error("Error in getActiveSessionStatuses service method", { error });
+      return [];
+    }
+  }
+
   async getEmailsByCompanyDate(user_id: string) {
     try {
       return await this.historyRepository.getEmailsByCompanyDate(user_id);
     } catch (error) {
       logger.error("Error in getEmailsByCompanyDate service method", { error });
+      return null;
+    }
+  }
+
+  async getSessionDetails(sessionId: string, user_id: string) {
+    try {
+      return await this.historyRepository.getSessionDetails(sessionId, user_id);
+    } catch (error) {
+      logger.error("Error in getSessionDetails service method", { error });
       return null;
     }
   }
@@ -104,12 +122,14 @@ export class LogHistoryService {
 
   async getEmailLogs(
     user_id: string,
-    last_sent_at: string | null
+    last_sent_at: string | null,
+    search: string | null = null
   ): Promise<EmailLog[] | null> {
     try {
       const emailLogsData = await this.historyRepository.getUserLogs(
         user_id,
-        last_sent_at
+        last_sent_at,
+        search
       );
 
       if (!emailLogsData) {

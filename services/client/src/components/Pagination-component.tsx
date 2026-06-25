@@ -24,9 +24,9 @@ const PaginationComponent = ({ table }: PaginationComponentProps) => {
           </Button>
         </PaginationItem>
 
-        <div className="flex-1 text-sm text-muted-foreground">
-          {table.getFilteredSelectedRowModel()?.rows.length} of{" "}
-          {table.getFilteredRowModel()?.rows.length} row(s) selected.
+        <div className="flex-1 px-3 text-center text-sm text-muted-foreground">
+          Page {table.getState().pagination.pageIndex + 1} of{" "}
+          {table.getPageCount() || 1} · {table.getRowCount()} session(s)
         </div>
 
         <PaginationItem>
@@ -35,9 +35,9 @@ const PaginationComponent = ({ table }: PaginationComponentProps) => {
             size="sm"
             className="ml-2 disabled:cursor-none"
             onClick={() => table.nextPage()}
-            // disabled={!table.getCanNextPage()}
+            disabled={!table.getCanNextPage()}
           >
-            Next 
+            Next
             </Button>
         </PaginationItem>
       </PaginationContent>

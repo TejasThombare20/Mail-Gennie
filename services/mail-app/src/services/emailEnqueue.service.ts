@@ -65,7 +65,6 @@ export class EmailEnqueueService {
     const {
       userId,
       templateId,
-      subject,
       recipients,
       localVariables,
       globalVariables,
@@ -73,7 +72,18 @@ export class EmailEnqueueService {
     } = params;
 
     // Heavy work ONCE per batch (Firebase attachment resolution lives here).
-    const { attachments } = await this.emailService.prepareBatch(userId, templateId);
+    // prepareBatch also returns the template's default subject so we can fall
+    // back to it when the client didn't supply one.
+    const { attachments, subject: templateSubject } =
+      await this.emailService.prepareBatch(userId, templateId);
+
+    // Effective subject: the user's typed subject wins; otherwise use the
+    // template's default subject. Placeholders ({{...}}) inside it are resolved
+    // per-recipient by TemplateRenderer at send time.
+    const subject =
+      params.subject && params.subject.trim().length > 0
+        ? params.subject
+        : templateSubject ?? "";
 
     const companyName =
       globalVariables.find((v) => v.key === "company_name")?.value ?? null;

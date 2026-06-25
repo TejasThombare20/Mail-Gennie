@@ -130,7 +130,8 @@ const HistoryRowDetails = ({ selectedRow }: Props) => {
             <CardTitle className="text-base">Global Variables</CardTitle>
           </CardHeader>
           <CardContent>
-            {selectedRow.global_variables.length === 0 ? (
+            {!selectedRow.global_variables ||
+            selectedRow.global_variables.length === 0 ? (
               <div className="text-center py-4 text-gray-500">
                 No global variables used
               </div>

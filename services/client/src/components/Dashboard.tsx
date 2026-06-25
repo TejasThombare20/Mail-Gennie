@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { OutreachPerson } from "../types/outreach";
 import apiHandler from "../handlers/api-handler";
@@ -69,6 +69,7 @@ import {
   CheckSquare,
   Square,
   Eye,
+  RefreshCw,
 } from "lucide-react";
 import { formatDate } from "../lib/utils";
 
@@ -150,11 +151,17 @@ const Dashboard = () => {
     null
   );
   const [tableLoading, setTableLoading] = useState(true);
+  const [tableRefreshing, setTableRefreshing] = useState(false);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>(ALL_VALUE);
   const [companyFilter, setCompanyFilter] = useState<string>(ALL_VALUE);
+
+  // Lazy-load: only fetch the (expensive) sessions endpoint once the Session
+  // Details card actually scrolls into view.
+  const [sessionsInView, setSessionsInView] = useState(false);
+  const sessionsCardRef = useRef<HTMLDivElement | null>(null);
 
   // ── Fetch summary + chart once ─────────────────────────────────────────
   useEffect(() => {
@@ -187,11 +194,14 @@ const Dashboard = () => {
     return () => clearTimeout(t);
   }, [search]);
 
-  // ── Fetch paginated sessions when query inputs change ──────────────────
-  useEffect(() => {
-    const fetchSessions = async () => {
+  // ── Fetch paginated sessions (reusable: query effect, reload button, SSE) ─
+  // `silent` skips the full-table loading skeleton (used by the manual reload
+  // button and SSE-driven refetches so the rows don't flash).
+  const fetchSessions = useCallback(
+    async ({ silent = false }: { silent?: boolean } = {}) => {
       try {
-        setTableLoading(true);
+        if (silent) setTableRefreshing(true);
+        else setTableLoading(true);
         const res = await apiHandler.get<PaginatedSessions>(
           "/api/loghistory/dashboard/sessions",
           {
@@ -208,11 +218,101 @@ const Dashboard = () => {
       } catch (error: any) {
         showErrorToast(error);
       } finally {
-        setTableLoading(false);
+        if (silent) setTableRefreshing(false);
+        else setTableLoading(false);
       }
-    };
+    },
+    [page, debouncedSearch, statusFilter, companyFilter]
+  );
+
+  // ── Lazy-load: observe the Session Details card; flip a flag when visible ─
+  useEffect(() => {
+    const el = sessionsCardRef.current;
+    if (!el || sessionsInView) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setSessionsInView(true);
+          observer.disconnect();
+        }
+      },
+      // Small positive margin: prefetch just before the card scrolls into view
+      // for a smooth reveal, but not so early that it loads on the landing frame.
+      { rootMargin: "100px" }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [sessionsInView, statsLoading]);
+
+  // ── Fetch paginated sessions when query inputs change (only once in view) ─
+  useEffect(() => {
+    if (!sessionsInView) return;
     fetchSessions();
-  }, [page, debouncedSearch, statusFilter, companyFilter]);
+  }, [sessionsInView, fetchSessions]);
+
+  // ── SSE: live-track active (queued/in_progress) sessions ───────────────
+  // While any session is moving, merge live counts/status into the visible
+  // rows; when the stream signals idle, do one silent refetch to pick up the
+  // now-completed rows (durations, resolved companies, etc.).
+  useEffect(() => {
+    if (!sessionsInView) return;
+
+    const es = new EventSource(
+      `${import.meta.env.MODE === "production"
+        ? import.meta.env.VITE_PROD_SERVER
+        : import.meta.env.VITE_LOCAL_SERVER
+      }/api/loghistory/dashboard/sessions/stream`,
+      { withCredentials: true }
+    );
+
+    es.addEventListener("status", (ev) => {
+      try {
+        const active: Array<{
+          id: string;
+          status: string;
+          total_emails: number;
+          sent_count: number;
+          failed_count: number;
+        }> = JSON.parse((ev as MessageEvent).data);
+        if (active.length === 0) return;
+
+        const byId = new Map(active.map((a) => [a.id, a]));
+        // Patch any currently-visible rows in place with the live numbers.
+        setSessionsData((prev) => {
+          if (!prev) return prev;
+          let changed = false;
+          const sessions = prev.sessions.map((row) => {
+            const live = byId.get(row.id);
+            if (!live) return row;
+            changed = true;
+            return {
+              ...row,
+              status: live.status,
+              sent_count: live.sent_count,
+              failed_count: live.failed_count,
+              total_emails: live.total_emails,
+            };
+          });
+          return changed ? { ...prev, sessions } : prev;
+        });
+      } catch {
+        /* ignore malformed frames */
+      }
+    });
+
+    // Server closes the stream once nothing is active — refetch once to sync.
+    es.addEventListener("idle", () => {
+      es.close();
+      fetchSessions({ silent: true });
+    });
+
+    es.onerror = () => {
+      // EventSource auto-reconnects; close on hard error to avoid a tight loop.
+      es.close();
+    };
+
+    return () => es.close();
+  }, [sessionsInView, fetchSessions]);
 
   // ── Bar-graph windowing ────────────────────────────────────────────────
   // Build a merged, chronologically-ordered series. Same company on the same
@@ -301,7 +401,17 @@ const Dashboard = () => {
       case "failed":
         return <Badge variant="destructive">Failed</Badge>;
       case "in_progress":
-        return <Badge className="bg-blue-600 text-white border-0">In Progress</Badge>;
+        return (
+          <Badge className="bg-blue-600 text-white border-0 animate-pulse">
+            In Progress
+          </Badge>
+        );
+      case "queued":
+        return (
+          <Badge className="bg-amber-500 text-white border-0 animate-pulse">
+            Queued
+          </Badge>
+        );
       default:
         return <Badge variant="secondary">{status}</Badge>;
     }
@@ -533,13 +643,31 @@ const Dashboard = () => {
         </Card>
       </div>
 
+      {/* Spacer: pushes the Session Details section below the initial viewport so
+          it isn't in the first frame — the lazy-load IntersectionObserver only
+          fires (and hits the API) once the user scrolls down to it. */}
+      <div aria-hidden className="h-[60vh]" />
+
       {/* Sessions Table */}
-      <Card>
-        <CardHeader>
+      <Card ref={sessionsCardRef}>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
           <CardTitle className="text-base flex items-center gap-2">
             <Mail className="h-4 w-4" />
             Session Details
           </CardTitle>
+          <Button
+            variant="outline"
+            size="sm"
+            className="flex items-center gap-1.5"
+            onClick={() => fetchSessions({ silent: true })}
+            disabled={tableLoading || tableRefreshing}
+            title="Reload session details"
+          >
+            <RefreshCw
+              className={`h-4 w-4 ${tableRefreshing ? "animate-spin" : ""}`}
+            />
+            Reload
+          </Button>
         </CardHeader>
         <CardContent>
           {/* Search + filters */}
@@ -593,8 +721,22 @@ const Dashboard = () => {
             </Select>
           </div>
 
-          <div className="rounded-md border">
-            <Table>
+          <div className="relative rounded-md border">
+            {/* Reload animation: dim + blur the table and show a spinner while a
+                silent refresh is in flight, then fade back in. */}
+            {tableRefreshing && (
+              <div className="absolute inset-0 z-10 flex items-center justify-center rounded-md bg-background/50 backdrop-blur-[1px] transition-opacity duration-300">
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <RefreshCw className="h-4 w-4 animate-spin" />
+                  Refreshing…
+                </div>
+              </div>
+            )}
+            <Table
+              className={`transition-all duration-300 ${
+                tableRefreshing ? "opacity-40 scale-[0.99]" : "opacity-100 scale-100"
+              }`}
+            >
               <TableHeader>
                 <TableRow>
                   <TableHead>Template</TableHead>
@@ -622,20 +764,29 @@ const Dashboard = () => {
                     </TableCell>
                   </TableRow>
                 ) : (
-                  sessions.map((session) => (
+                  sessions.map((session) => {
+                    // Sent is derived as (total − failed) so the row always
+                    // reconciles: Sent + Failed = Total. The raw sent_count can
+                    // double-count bounces (counted as failed but not removed
+                    // from sent), so we never display it directly.
+                    const displayedSent = Math.max(
+                      0,
+                      session.total_emails - session.failed_count
+                    );
+                    return (
                     <TableRow key={session.id}>
                       <TableCell className="text-muted-foreground">
                         {session.template_name || "-"}
                       </TableCell>
                       <TableCell>{getStatusBadge(session.status)}</TableCell>
                       <TableCell className="text-center text-green-600 font-medium">
-                        {session.sent_count}
+                        <AnimatedNumber value={displayedSent} />
                       </TableCell>
                       <TableCell className="text-center text-red-600 font-medium">
-                        {session.failed_count}
+                        <AnimatedNumber value={session.failed_count} />
                       </TableCell>
                       <TableCell className="text-center">
-                        {session.total_emails}
+                        <AnimatedNumber value={session.total_emails} />
                       </TableCell>
                       <TableCell className="max-w-[180px]">
                         {session.recipient_companies.length > 0 ? (
@@ -703,7 +854,8 @@ const Dashboard = () => {
                         </DropdownMenu>
                       </TableCell>
                     </TableRow>
-                  ))
+                    );
+                  })
                 )}
               </TableBody>
             </Table>
@@ -790,5 +942,40 @@ const DetailRow = ({ label, value }: { label: string; value: string }) => (
     <span className="font-medium text-right break-all">{value}</span>
   </div>
 );
+
+/**
+ * Renders a number that briefly highlights (scale + ring flash) whenever its
+ * value changes — used so live SSE updates to a queued session's counts are
+ * visually noticeable. Skips the flash on first mount.
+ */
+const AnimatedNumber = ({ value }: { value: number }) => {
+  const [flash, setFlash] = useState(false);
+  const prev = useRef(value);
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true;
+      prev.current = value;
+      return;
+    }
+    if (prev.current !== value) {
+      prev.current = value;
+      setFlash(true);
+      const t = setTimeout(() => setFlash(false), 600);
+      return () => clearTimeout(t);
+    }
+  }, [value]);
+
+  return (
+    <span
+      className={`inline-block tabular-nums transition-transform duration-300 ${
+        flash ? "scale-150 animate-pulse" : "scale-100"
+      }`}
+    >
+      {value}
+    </span>
+  );
+};
 
 export default Dashboard;

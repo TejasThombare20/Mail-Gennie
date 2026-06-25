@@ -503,7 +503,11 @@ function parseArgs(): ParsedArgs {
     } else if (args[i] === "--productInfo" && args[i + 1]) {
       productInfo = args[++i];
     } else if (args[i] === "--jobId" && args[i + 1]) {
-      jobId = "job ID :" + "( " + args[++i] + " )";
+      const rawJob = args[++i];
+      // A URL (http/https/www.) is a job LINK; anything else is a job ID.
+      const isLink = /^(https?:\/\/|www\.)/i.test(rawJob.trim());
+      const label = isLink ? "job link :" : "job Id :";
+      jobId = label + "( " + rawJob + " )";
     } else if (args[i] === "--subject" && args[i + 1]) {
       subject = args[++i];
     } else if (args[i] === "--role" && args[i + 1]) {

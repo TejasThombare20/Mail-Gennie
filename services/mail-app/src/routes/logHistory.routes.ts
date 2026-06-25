@@ -10,6 +10,11 @@ export const createLogHistoryRouter = (logHistoryController: LogHistoryControlle
   router.get('/dashboard/stats', authMiddleware, logHistoryController.getDashboardStats);
   router.get('/dashboard/sessions', authMiddleware, logHistoryController.getDashboardSessions);
   router.get('/dashboard/emails-by-company-date', authMiddleware, logHistoryController.getEmailsByCompanyDate);
+  // SSE stream of active (queued/in_progress) sessions for live dashboard updates.
+  router.get('/dashboard/sessions/stream', authMiddleware, logHistoryController.streamSessionStatus);
+
+  // Lazy session details (recipients + variables) for History expand / view-details.
+  router.get('/session/:sessionId/details', authMiddleware, logHistoryController.getSessionDetails);
 
   // Outreach / user-action endpoints (must come before the catch-all below)
   router.get('/session/:sessionId/outreach', authMiddleware, logHistoryController.getSessionForOutreach);

@@ -36,8 +36,12 @@ export interface EmailTemplate {
     html_content: string;
     local_variables: TemplateVariable[];
     global_variables: GlobalTemplateVariable[];
+    /** Default subject line for this template (may contain {{placeholders}}). */
+    subject?: string | null;
+    /** Stable per-user number used for tag-based routing (e.g. "template 4"). */
+    template_number?: number | null;
 
-  } 
+  }
 
 export interface Design {
   counters: {

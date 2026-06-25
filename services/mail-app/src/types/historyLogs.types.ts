@@ -44,7 +44,10 @@ export interface EmailSession {
   started_at: Date;
   completed_at: Date | null;
   created_at: Date;
-  // Joined from email_logs
+  // List-only aggregates (returned by the History list query, not details).
+  recipient_count?: number;
+  has_responded?: boolean;
+  // Joined from email_logs (only on the details query)
   email_logs?: EmailLogEntry[];
 }
 

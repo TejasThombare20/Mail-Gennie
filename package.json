@@ -10,6 +10,7 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
+    "kill": "(pkill -f 'mail-app/node_modules/.bin/(ts-node|nodemon)' || true) ; echo 'cleaned stale dev processes'",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck"
   },

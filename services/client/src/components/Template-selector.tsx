@@ -32,12 +32,15 @@ interface TemplateSelectorProps {
 form : any
   value: EmailTemplate;
   onChange: (value: getUserTemplatesApiResponse) => void;
+  /** Lets the parent (send form) map a tag's "template N" to a real template. */
+  onTemplatesLoaded?: (templates: getUserTemplatesApiResponse[]) => void;
 }
 
 const TemplateSelector = ({
   form,
   value,
-  onChange
+  onChange,
+  onTemplatesLoaded,
 }: TemplateSelectorProps) => {
   const showErrorToast = useHandleApiError();
   const showSuccessToast = useSuccessToast();
@@ -55,7 +58,9 @@ const TemplateSelector = ({
         const userTempaltesData = await apiHandler.get<
           getUserTemplatesApiResponse[]
         >("/api/templates");
-        setTemplates(userTempaltesData.data!);
+        const fetched = userTempaltesData.data ?? [];
+        setTemplates(fetched);
+        onTemplatesLoaded?.(fetched);
         showSuccessToast("templates fetched successfully");
         setIsLoading(false);
       } catch (error) {
@@ -75,8 +80,9 @@ const TemplateSelector = ({
         onValueChange={(id) => {
           const template = templates.find((t) => t.id === id);
           if (template) {
-            form.setValue("global_variables", template.global_variables);
-            form.setValue("local_variables", template.local_variables);
+            // Subject + variables are now managed per-template in the send form's
+            // own state (it initializes a config from this template's definition),
+            // so the selector only needs to set the selected template itself.
             onChange(template)
           }
         }}

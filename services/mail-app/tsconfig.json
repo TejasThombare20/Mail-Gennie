@@ -107,5 +107,11 @@
     /* Completeness */
     // "skipDefaultLibCheck": true,                      /* Skip type checking .d.ts files that are included with TypeScript. */
     "skipLibCheck": true                                 /* Skip type checking all .d.ts files. */
+  },
+  "ts-node": {
+    /* Skip runtime type-checking in dev — transpile only. Cuts each ts-node
+       process from ~800MB to ~100MB (no TS type-checker held in memory).
+       Type errors are still caught by `npm run typecheck` (tsc --noEmit). */
+    "transpileOnly": true
   }
 }

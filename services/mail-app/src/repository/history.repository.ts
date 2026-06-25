@@ -91,10 +91,56 @@ export class HistoryRepository {
 
   async getUserSessions(
     user_id: string,
-    last_started_at: string | null = null
+    last_started_at: string | null = null,
+    search: string | null = null
   ): Promise<EmailSession[] | null> {
     try {
-      // Fetch sessions with template name
+      // Base filters (user + keyset pagination).
+      const params: any[] = [
+        user_id,
+        last_started_at ? new Date(last_started_at).toISOString() : null,
+      ];
+      const where: string[] = [
+        "es.user_id = $1",
+        "($2::timestamp IS NULL OR es.started_at < $2)",
+      ];
+
+      // Load the latest 100 sessions so the History table can paginate through
+      // them client-side (10 per page). With a search we match across:
+      //   - subject + template name,
+      //   - every global variable key/value (company_name, portal_link,
+      //     portal_name, ROLE, …) via ::text,
+      //   - any recipient's email or local variable (receiver_name) via ::text.
+      // ::text ILIKE mirrors the previous client-side key+value search.
+      const limit = 100;
+      const term = search?.trim();
+      if (term) {
+        params.push(`%${term}%`);
+        const p = `$${params.length}`;
+        where.push(`(
+          es.subject ILIKE ${p}
+          OR t.name ILIKE ${p}
+          OR es.global_variables::text ILIKE ${p}
+          OR EXISTS (
+            SELECT 1 FROM email_logs el
+            WHERE el.session_id = es.id
+              AND (
+                el.recipient_email ILIKE ${p}
+                OR el.local_variables::text ILIKE ${p}
+              )
+          )
+        )`);
+      }
+
+      // LIST QUERY ONLY. The History table renders template / subject / status /
+      // success-rate / started-at / actions — none of which need the (heavy)
+      // per-recipient email_logs rows. So we DON'T join/select email_logs here;
+      // we only derive two lightweight aggregates the list needs:
+      //   - recipient_count : shown nowhere directly but lets the UI know if the
+      //                       row is expandable before fetching the recipients.
+      //   - has_responded   : powers the "Responded ✓" checkmark in Actions.
+      // The full recipients + local/global variables are fetched lazily by
+      // getSessionDetails() when a row is expanded or "View details" is opened.
       const sessionQuery = `
         SELECT
             es.id,
@@ -102,6 +148,9 @@ export class HistoryRepository {
             es.template_id,
             t.name AS template_name,
             es.subject,
+            -- global_variables is a small per-session JSON column (NOT a join);
+            -- kept so the list can resolve {{placeholders}} in the Subject. The
+            -- heavy per-recipient email_logs + local_variables stay lazy.
             es.global_variables,
             es.total_emails,
             es.sent_count,
@@ -109,47 +158,25 @@ export class HistoryRepository {
             es.status,
             es.started_at,
             es.completed_at,
-            es.created_at
+            es.created_at,
+            (
+              SELECT COUNT(*)::int FROM email_logs el WHERE el.session_id = es.id
+            ) AS recipient_count,
+            EXISTS (
+              SELECT 1 FROM email_logs el
+              WHERE el.session_id = es.id
+                AND jsonb_array_length(
+                      COALESCE(el.user_actions->'mail_replied', '[]'::jsonb)
+                    ) > 0
+            ) AS has_responded
         FROM email_sessions es
         LEFT JOIN templates t ON es.template_id = t.id
-        WHERE es.user_id = $1
-        AND ($2::timestamp IS NULL OR es.started_at < $2)
+        WHERE ${where.join(" AND ")}
         ORDER BY es.started_at DESC
-        LIMIT 10;
+        LIMIT ${limit};
       `;
-      const values = [
-        user_id,
-        last_started_at ? new Date(last_started_at).toISOString() : null,
-      ];
-      const sessionResult = await this.pool.query(sessionQuery, values);
+      const sessionResult = await this.pool.query(sessionQuery, params);
       const sessions: EmailSession[] = sessionResult.rows;
-
-      if (sessions.length === 0) return sessions;
-
-      // Fetch email logs for all these sessions in one query
-      const sessionIds = sessions.map((s) => s.id);
-      const logsResult = await this.pool.query(
-        `SELECT id, session_id, recipient_email, local_variables, status, sent_at, last_updated,
-                COALESCE(user_actions, '{}'::jsonb) AS user_actions
-         FROM email_logs
-         WHERE session_id = ANY($1)
-         ORDER BY sent_at ASC`,
-        [sessionIds]
-      );
-
-      // Group logs by session_id
-      const logsBySession: Record<string, EmailLogEntry[]> = {};
-      for (const log of logsResult.rows) {
-        if (!logsBySession[log.session_id]) {
-          logsBySession[log.session_id] = [];
-        }
-        logsBySession[log.session_id].push(log);
-      }
-
-      // Attach logs to sessions
-      for (const session of sessions) {
-        session.email_logs = logsBySession[session.id] || [];
-      }
 
       return sessions;
     } catch (error) {
@@ -245,6 +272,41 @@ export class HistoryRepository {
     }
   }
 
+  // ── Live status of active sessions (for the dashboard SSE stream) ──
+
+  /**
+   * Returns the lightweight progress rows for every session of a user that is
+   * still moving (queued or in_progress). The dashboard SSE handler polls this
+   * on an interval and pushes the rows to the client; when the array is empty
+   * (nothing active) the stream can idle or close.
+   */
+  async getActiveSessionStatuses(user_id: string): Promise<
+    Array<{
+      id: string;
+      status: string;
+      total_emails: number;
+      sent_count: number;
+      failed_count: number;
+      started_at: Date | null;
+      completed_at: Date | null;
+    }>
+  > {
+    try {
+      const result = await this.pool.query(
+        `SELECT id, status, total_emails, sent_count, failed_count, started_at, completed_at
+         FROM email_sessions
+         WHERE user_id = $1
+           AND status IN ('queued', 'in_progress')
+         ORDER BY started_at DESC`,
+        [user_id]
+      );
+      return result.rows;
+    } catch (error) {
+      logger.error("Error fetching active session statuses", { error });
+      return [];
+    }
+  }
+
   // ── Bar-graph aggregation (company + date) ────────────────────────
 
   /**
@@ -276,6 +338,7 @@ export class HistoryRepository {
            SELECT
              es.id AS session_id,
              to_char(es.started_at, 'YYYY-MM-DD') AS day,
+             es.started_at,
              es.sent_count,
              es.failed_count,
              COALESCE(
@@ -302,7 +365,9 @@ export class HistoryRepository {
            SUM(failed_count)::int AS failed
          FROM session_companies sc, unnest(sc.companies) AS company
          GROUP BY day, company
-         ORDER BY day ASC, company ASC`,
+         -- Within a day keep bars in send order (earliest session for that
+         -- company first), NOT alphabetically by company name.
+         ORDER BY day ASC, MIN(sc.started_at) ASC`,
         [user_id]
       );
       return result.rows;
@@ -367,15 +432,35 @@ export class HistoryRepository {
           SELECT
             es.id AS session_id,
             COALESCE(
-              ARRAY(
-                SELECT DISTINCT ser.company_name
-                FROM email_logs el
-                JOIN sent_email_records ser ON ser.email = el.recipient_email
-                WHERE el.session_id = es.id
-                  AND ser.company_name IS NOT NULL
-                  AND ser.company_name != ''
+              -- Resolved companies from sent_email_records (populated at send time).
+              NULLIF(
+                ARRAY(
+                  SELECT DISTINCT ser.company_name
+                  FROM email_logs el
+                  JOIN sent_email_records ser ON ser.email = el.recipient_email
+                  WHERE el.session_id = es.id
+                    AND ser.company_name IS NOT NULL
+                    AND ser.company_name != ''
+                ),
+                '{}'
               ),
-              '{}'
+              -- Fallback for queued/in-progress sessions whose recipients haven't
+              -- been sent yet (so no sent_email_records row exists): pull the
+              -- company_name out of the session's global_variables JSON array
+              -- (shape: [{ "key": "company_name", "value": "Google" }, ...]).
+              COALESCE(
+                (
+                  SELECT ARRAY[gv->>'value']
+                  FROM jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(es.global_variables) = 'array'
+                         THEN es.global_variables ELSE '[]'::jsonb END
+                  ) AS gv
+                  WHERE gv->>'key' = 'company_name'
+                    AND COALESCE(gv->>'value', '') != ''
+                  LIMIT 1
+                ),
+                '{}'
+              )
             ) AS companies
           FROM email_sessions es
           WHERE es.user_id = $1
@@ -481,6 +566,61 @@ export class HistoryRepository {
       };
     } catch (error) {
       logger.error("Error fetching paginated dashboard sessions", { error });
+      return null;
+    }
+  }
+
+  // ── Lazy session details (recipients + variables) ─────────────────
+
+  /**
+   * Full detail for ONE session, scoped to its owner: the session row (incl.
+   * global_variables) plus all its per-recipient email_logs (recipient_email,
+   * local_variables, status, user_actions). The History list intentionally
+   * omits these heavy fields; this is fetched only when a row is expanded or
+   * "View details" / "Email Campaign Details" is opened.
+   */
+  async getSessionDetails(
+    sessionId: string,
+    user_id: string
+  ): Promise<EmailSession | null> {
+    try {
+      const sessionResult = await this.pool.query(
+        `SELECT
+            es.id,
+            es.user_id,
+            es.template_id,
+            t.name AS template_name,
+            es.subject,
+            es.global_variables,
+            es.total_emails,
+            es.sent_count,
+            es.failed_count,
+            es.status,
+            es.started_at,
+            es.completed_at,
+            es.created_at
+         FROM email_sessions es
+         LEFT JOIN templates t ON es.template_id = t.id
+         WHERE es.id = $1 AND es.user_id = $2`,
+        [sessionId, user_id]
+      );
+
+      if (sessionResult.rowCount === 0) return null;
+      const session: EmailSession = sessionResult.rows[0];
+
+      const logsResult = await this.pool.query(
+        `SELECT id, session_id, recipient_email, local_variables, status, sent_at, last_updated,
+                COALESCE(user_actions, '{}'::jsonb) AS user_actions
+         FROM email_logs
+         WHERE session_id = $1
+         ORDER BY sent_at ASC NULLS LAST, id ASC`,
+        [sessionId]
+      );
+
+      session.email_logs = logsResult.rows as EmailLogEntry[];
+      return session;
+    } catch (error) {
+      logger.error("Error fetching session details", { error });
       return null;
     }
   }
@@ -773,9 +913,10 @@ export class HistoryRepository {
 
   async getUserLogs(
     user_id: string,
-    last_sent_at: string | null = null
+    last_sent_at: string | null = null,
+    search: string | null = null
   ): Promise<EmailSession[] | null> {
     // Redirect to the new session-based query
-    return this.getUserSessions(user_id, last_sent_at);
+    return this.getUserSessions(user_id, last_sent_at, search);
   }
 }

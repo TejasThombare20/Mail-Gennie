@@ -37,7 +37,10 @@ export const getColumns = ({
       id: "expand",
       header: "",
       cell: ({ row }) => {
-        return row.getCanExpand() ? (
+        // The list payload has no email_logs (they're lazy-loaded on expand), so
+        // expandability is driven by recipient_count, not row.getCanExpand().
+        const expandable = (row.original.recipient_count ?? 0) > 0;
+        return expandable ? (
           <Button
             variant="ghost"
             size="sm"
@@ -142,9 +145,14 @@ export const getColumns = ({
       enableSorting: false,
       cell: ({ row }) => {
         if (row.depth > 0) return null;
-        const anyResponded = (row.original.email_logs || []).some(
-          (l: any) => (l?.user_actions?.mail_replied?.length ?? 0) > 0
-        );
+        // Driven by the list payload's `has_responded` aggregate (the full
+        // email_logs aren't fetched until a row is expanded/viewed). Fall back
+        // to scanning email_logs in case details were already merged in.
+        const anyResponded =
+          row.original.has_responded ??
+          (row.original.email_logs || []).some(
+            (l: any) => (l?.user_actions?.mail_replied?.length ?? 0) > 0
+          );
         return (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>

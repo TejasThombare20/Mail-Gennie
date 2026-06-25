@@ -14,7 +14,7 @@ export class TemplateController {
 
   createTemplate = async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const { name, json_data, html_content, category, attachments, local_variables , global_variables } = req.body;
+      const { name, json_data, html_content, category, attachments, local_variables , global_variables, subject, template_number } = req.body;
 
       // If json_data is missing/empty but html_content is provided, generate Unlayer design from HTML
       const resolvedJsonData =
@@ -31,6 +31,8 @@ export class TemplateController {
         category,
         local_variables,
         global_variables,
+        subject,
+        template_number,
       });
       if(!template){
         res.status(404).json({ error : "Unable to create template", message: "Failed to create template", success: false });

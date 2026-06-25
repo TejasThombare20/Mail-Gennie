@@ -25,6 +25,16 @@ export class HeuristicBounceSignalDetector implements IBounceSignalDetector {
     "mail delivery system",
   ];
 
+  /**
+   * Sender addresses/domains whose mail should always be treated as a delivery
+   * failure (e.g. security-gateway / quarantine notifiers that reject our mail
+   * without emitting a standard daemon bounce). Matched as a substring against
+   * the lowercased From header.
+   */
+  private readonly failureSenders = [
+    "no-reply@tmes-in.trendmicro.com",
+  ];
+
   private readonly failurePhrases = [
     "delivery status notification (failure)",
     "delivery status notification",
@@ -42,6 +52,10 @@ export class HeuristicBounceSignalDetector implements IBounceSignalDetector {
     const subject = subjectHeader.toLowerCase();
 
     if (this.daemonMarkers.some((marker) => from.includes(marker))) {
+      return true;
+    }
+
+    if (this.failureSenders.some((sender) => from.includes(sender))) {
       return true;
     }
 

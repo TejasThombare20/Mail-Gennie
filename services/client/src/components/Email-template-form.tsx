@@ -48,6 +48,14 @@ export const emailTemplateSchema = z.object({
   id: z.string().optional(),
   name: z.string().min(1, "Template name is required"),
   category: z.string().min(1, "Category is required"),
+  // Default subject line for the template; may contain {{placeholders}}.
+  subject: z.string().optional(),
+  // Stable per-user number used for tag-based routing (e.g. "template 4").
+  // Coerced from the number input; empty input becomes undefined.
+  template_number: z
+    .union([z.coerce.number().int().positive(), z.literal("")])
+    .optional()
+    .transform((v) => (v === "" || v === undefined ? null : v)),
   attachments: z.array(
     z.object({
       id: z.string(),
@@ -102,6 +110,8 @@ const EmailTemplateForm = ({ template }: EmailTemplateFormProps) => {
       id: template?.id,
       name: template?.name! || "",
       category: template?.category! || "",
+      subject: template?.subject ?? "",
+      template_number: template?.template_number ?? null,
       attachments: template?.attachmentsdata || [],
       json_data: template?.json_data || {},
       html_content: template?.html_content || "",
@@ -398,6 +408,59 @@ const EmailTemplateForm = ({ template }: EmailTemplateFormProps) => {
                             <SelectItem value="other">other</SelectItem>
                           </SelectContent>
                         </Select>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </div>
+                <div className="w-full flex justify-between items-start gap-6">
+                  <FormField
+                    control={form.control}
+                    name="subject"
+                    render={({ field }) => (
+                      <FormItem className="w-4/5">
+                        <FormLabel>Default Subject</FormLabel>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            value={field.value ?? ""}
+                            placeholder="e.g. Referral for {{ROLE}} at {{company_name}}"
+                          />
+                        </FormControl>
+                        <p className="text-xs text-muted-foreground">
+                          Prefilled in the send form when this template is
+                          selected (you can override it there). Placeholders like{" "}
+                          {"{{company_name}}"} are resolved per recipient.
+                        </p>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="template_number"
+                    render={({ field }) => (
+                      <FormItem className="w-1/5">
+                        <FormLabel>Template #</FormLabel>
+                        <FormControl>
+                          <Input
+                            type="number"
+                            min={1}
+                            placeholder="e.g. 4"
+                            value={field.value ?? ""}
+                            onChange={(e) =>
+                              field.onChange(
+                                e.target.value === ""
+                                  ? null
+                                  : Number(e.target.value)
+                              )
+                            }
+                          />
+                        </FormControl>
+                        <p className="text-xs text-muted-foreground">
+                          Used to route a pasted recipient tagged "template{" "}
+                          {field.value ?? "N"}" to this template.
+                        </p>
                         <FormMessage />
                       </FormItem>
                     )}

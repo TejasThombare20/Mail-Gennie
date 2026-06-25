@@ -241,14 +241,18 @@ export class EmailService {
   async prepareBatch(
     userId: string,
     templateId: string
-  ): Promise<{ html: string; attachments: EmailAttachment[] }> {
+  ): Promise<{ html: string; subject: string | null; attachments: EmailAttachment[] }> {
     const template = await this.templateRepository.getTemplateById(templateId, userId);
     if (!template) {
       throw new Error("Template not found");
     }
 
     const resolved = await this.resolveAttachments(template, userId);
-    return { html: template.html_content, attachments: resolved };
+    return {
+      html: template.html_content,
+      subject: template.subject ?? null,
+      attachments: resolved,
+    };
   }
 
   /**
